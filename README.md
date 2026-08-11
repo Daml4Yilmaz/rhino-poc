@@ -27,7 +27,9 @@ Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
 **Telefon**
 - [ ] Arka ana kamera, **zoom tam 1.0×** ve hiç dokunulmadan (lens değişimi odak uzaklığını değiştirir, tek-kamera varsayımını sessizce bozar)
 - [ ] Kayıttan **önce AE/AF kilidi** (basılı tut). Kilitsiz çekim geçersizdir.
-- [ ] Kayıt uygulaması: **Stray Scanner** (LiDAR şart) veya Record3D — video + ARKit pozu birlikte kaydedilmeli
+- [ ] Kayıt uygulaması: **Stray Scanner** veya Record3D. **iPhone'un kendi Kamera uygulaması yetmez** — o yalnızca pikselleri kaydeder, ARKit kamera pozunu ve LiDAR derinliğini dosyaya yazmaz. Ölçek videonun içinde değil, çekim anındaki hareket takibindedir; kayıt bittikten sonra geri gelmez. Stok Kamera 4K (8.3 MP) ile daha iyi doku verir ama **milimetre vermez** → yalnızca açılar ve Goode oranı hesaplanabilir, G1 karşılanamaz.
+  - Stray Scanner LiDAR'lı cihaz ister (iPhone 12 Pro ve sonrası; 14 Pro Max uygun). LiDAR yoksa Record3D yalnız ARKit poziyle çalışır, `s_depth` çapraz kontrolü devre dışı kalır.
+  - 1920×1440 yeterli mi? 65 cm'den yüz kısa kenarın ~%60'ını kaplar → **~4 piksel/mm**. 2 mm hedefi için fazlasıyla yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
 
 **Geçiş 1 — göz hizası, kulaktan kulağa**
 - [ ] Sağ kulaktan sol kulağa (ya da tersi — `case.json`'a yazılır), 180°

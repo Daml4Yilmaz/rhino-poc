@@ -300,6 +300,6 @@ The mitigation is deliberately not another marker. It is **one calibration exerc
 
 ## 10. Open questions
 
-1. **Which iPhone is available for capture?** LiDAR requires a Pro model (12 Pro or later) or an iPad Pro. With LiDAR: §2.2 cross-check works, plus a depth prior for low-texture cheeks and forehead. Without it: ARKit VIO still gives metric poses via Record3D and §2.1 stands alone. This changes WP2's acceptance criteria, so it is the one answer needed before WP2 starts.
+1. ~~Which iPhone is available for capture?~~ **Answered: iPhone 14 Pro Max.** LiDAR is present, so §2.2's depth cross-check is available and WP2 keeps its full acceptance criteria (`s_pose` vs `s_depth` within 1.5%). Capture app is **Stray Scanner**; the stock Camera app cannot be used because it writes pixels only — ARKit poses and LiDAR depth are not recoverable after the fact, and without them the model has no millimetres. The resolution cost is acceptable: 1920×1440 at 65 cm gives ~4 px/mm, well inside what 2 mm geometry needs. 4K via a custom ARKit app (WP8) buys texture, not accuracy.
 2. **Exact landmark definitions for the six measurements, in writing, signed by the surgeon.** `measure.py` encodes one interpretation (e.g. Goode = alar-crease-to-tip ÷ nasion-to-tip); if it differs from theirs, every error number is meaningless.
 3. **Blind caliper session with two observers**, so inter-observer variability is reported alongside our error. If the caliper's own repeatability is ±1.5 mm, a 2 mm target needs restating.
