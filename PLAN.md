@@ -1,303 +1,305 @@
-# rhino-poc — Execution Plan (v3, Aug 2026)
+# rhino-poc — Execution Plan (v4, Aug 2026)
 
-Supersedes the sequencing in `README.md`. Decisions from `HANDOVER_claude_code.md`
-are kept. Two things change here:
+**This is a rebuild, not a patch.** v2/v3 are superseded. What changes:
 
-1. **The input is photogrammetry — discrete still photos, not video frames.**
-2. **Where each stage runs** — local (M4 Pro) by default, Colab GPU only where CUDA is unavoidable.
+1. **No fiducial markers.** ArUco and ChArUco are dropped entirely.
+2. **Two-person capture.** Subject sits still; a second person films two passes.
+3. **Scale comes from ARKit/LiDAR**, cross-checked against LiDAR depth — not from a printed target.
+4. Retained from v2: local-first execution, Colab GPU for `mvs`/`gsplat` only, PyTorch3D dropped.
 
 ---
 
-## 0. What Kratos actually does — and what it means for us
-
-Findings from their site, App Store listing and marketing copy (Aug 2026):
+## 0. Kratos — what the evidence supports
 
 | Claim | Source | What it implies |
 |---|---|---|
-| "move around the person as if you were shooting a video" | site / press | A guided orbit. The underlying reconstruction is still **SfM/MVS photogrammetry** — the video framing is a capture-UX choice, not a different algorithm. |
-| "using only your smartphone", "standard mobile cameras", "no expensive in-clinic hardware" | site | The baseline path does **not** depend on LiDAR or TrueDepth. |
-| App requires iOS 16+, **no Pro / LiDAR / TrueDepth restriction** listed | App Store | Confirms the above — it runs on non-Pro iPhones. |
-| "Advanced Scanning" on **iPhone Pro** adds a "4th Stage" nose capture in "ultra-high resolution" | App Store | Pro-only extra pass. Likely LiDAR-assisted **scale/pose priors**, not the geometry itself. |
-| "cloud-based algorithm trained on CNN data" | site | Server-side reconstruction. Processing is not on-device. |
-| Resections at Radix / Rhinion / Supratip / Infratip, "subcutaneous anatomy (under the skin)" | site | A **statistical model fitted to the scan** (soft-tissue → bone/cartilage prior), not measured anatomy. Exactly the FLAME-fit role in our pipeline. |
-| Validation vs. "legacy hardware scanners" at Ege, Cerrahpaşa, Cairo | site | Their accuracy bar is a comparison study, same class of evidence as our caliper protocol. |
+| "move around the person as if you were shooting a video" | site / press | A guided orbit around a still subject. Reconstruction is SfM/MVS **photogrammetry**. |
+| "using only your smartphone", "standard mobile cameras" | site | Baseline path does not require LiDAR. |
+| iOS 16+, **no Pro / LiDAR restriction** in the App Store listing | App Store | Confirms it runs on non-Pro iPhones. |
+| "Advanced Scanning" on **iPhone Pro** adds a "4th Stage" nose capture in "ultra-high resolution" | App Store | A Pro-only extra pass. Pro is exactly the LiDAR tier, and iOS 16 is exactly the ARKit 6 4K tier — most plausibly LiDAR- and/or 4K-assisted. |
+| "cloud-based algorithm trained on CNN data" | site | Server-side reconstruction. |
+| Resections at Radix / Rhinion / Supratip / Infratip, "subcutaneous anatomy" | site | A statistical model fitted to the scan — the FLAME-fit role in our pipeline. |
 
-**Conclusion: the working hypothesis holds — this is photogrammetry on the rear
-camera**, cloud-processed, with a template model for under-the-skin inference. The
-fine detail visible in their results (moles, wrinkles) is consistent with
-high-resolution RGB photogrammetry and not with a 1,220-vertex depth-sensor mesh.
-Nothing here requires a capture modality we don't have.
+**No printed marker appears anywhere in their material** — not in the app screenshots, not in the workflow description, not in the patient instructions. A consumer product that shipped a print-and-wear fiducial would have to say so prominently, and it doesn't. Dropping ArUco/ChArUco moves us toward their architecture, not away from it.
 
-**The one thing they have and we must engineer around: metric scale.** They ship a
-native app, so they can read ARKit/LiDAR pose at capture time and get mm for free.
-We ingest an uploaded photo set, so scale must come from a printed marker (PoC) —
-and from ARKit pose recording once we go native (post-G1). This is the single
-largest accuracy risk in the PoC and is why WP2 exists.
-
-**Not visible anywhere in their public material:** the reconstruction backend, the
-mesh resolution, the accuracy number in mm. Treat their marketing precision
-("millimetric") as unverified.
+Since they ship a native app, their scale almost certainly comes from ARKit at capture time. That is the path this plan now takes.
 
 ---
 
-## 1. Input: still photographs
+## 1. Capture protocol — two-person, two passes
 
-**Decision: the pipeline ingests a folder of still photos.** Video frame
-extraction is removed from the primary path.
+**Roles.** The subject is stationary. A second person operates the phone and walks the arc. This removes the arm's-length constraint, the awkward self-orbit, and the long static hold that v3 required.
 
-Why this is the right input for a 2 mm target:
+### Setup
+- Subject **seated**, upright, back against the chair, feet flat. A chair with a headrest is better than one without.
+- Hair fully under a cap. Ears exposed. No glasses, no earrings.
+- Eyes fixed on a **marked point** at eye level, ~3 m away. Not on the phone — tracking the phone rotates the head.
+- **Neutral face, mouth closed, no talking, no swallowing on cue.** SfM cannot survive a non-rigid scene.
+- Matte skin (translucent powder if shiny). Specular highlights move with the camera and are reconstructed as geometry.
 
-| | Video frames (1080p/60) | Still photos |
-|---|---|---|
-| Resolution | 2.1 MP | 12–48 MP |
-| Compression | H.264/HEVC, inter-frame — blocking and ringing on skin texture | HEIC/JPEG intra-frame only, near-lossless at max quality |
-| Rolling shutter | severe, camera is moving continuously | minimal, camera is momentarily still per shot |
-| Motion blur | continuous-motion smear on every frame | avoidable — stop, settle, shoot |
-| ChArUco corner precision | limited by both resolution and compression | subpixel corners on a clean, sharp, high-res image |
-| SIFT feature quality | degraded by compression artifacts | clean |
+### Environment — changed from earlier versions
+- **Background must be static and visually textured.** This reverses the old "plain untextured background" instruction, for two reasons: ARKit's visual-inertial odometry needs environment features to hold metric tracking, and with a stationary subject the room and the face form **one rigid scene**, so background features add well-conditioned constraints to the SfM problem rather than corrupting it. Background geometry is removed later by masking (WP3), which is cheap; poor tracking is not recoverable.
+- Nothing in frame may move — no other people, no screens, no windows with traffic behind them.
+- Diffuse, even, **constant** lighting. No flicker; if shooting under mains-frequency lighting, verify no banding at the chosen frame rate.
 
-The ChArUco corner precision row is the one that decides G1. Our scale factor comes
-from marker corners; corner localization error propagates directly and linearly
-into every millimetre measurement. Video throws away most of the sensor's spatial
-resolution before we ever see the marker.
+### Pass 1 — eye level, ear to ear
+- Filmer starts at the subject's **right ear**, ends at the **left ear** (or the reverse — consistently, and recorded in `case.json`).
+- Camera at the subject's **eye level**, lens pointed at the nose.
+- Distance **60–70 cm**, held constant. The filmer's forearm length is a usable gauge.
+- **25–35 seconds** for the full 180°. Heel-toe walk, both hands on the phone, elbows braced against the ribs.
+- Steady pace. Pauses are harmless; sudden accelerations are not — they blur frames and shake VIO.
 
-**The honest cost of this choice:** the subject must hold a neutral pose for
-~90–120 s instead of ~25 s. Non-rigidity is the failure mode SfM cannot survive, so
-the protocol compensates — see below. This is a deliberate trade: we accept a
-harder capture in exchange for the input quality the accuracy target needs.
+### Pass 2 — low angle, tilted up (nasal base)
+- Filmer drops to roughly **chest/chin height of the subject**, camera tilted **upward ~30°** so both nostrils, the columella and the alar creases are clearly visible.
+- Same ear-to-ear arc, **15–25 seconds**, same distance.
+- This pass carries the geometry behind four of the six measurements. If one pass is worth reshooting, it is this one.
 
-### 1.1 Capture protocol (revised)
+### Between passes
+- Let the subject relax, then re-settle and re-fix on the mark. Two short holds beat one long one.
+- **Do not stop the recording between passes** if using an ARKit recorder — a single continuous session keeps one tracking origin and one metric frame, which is what makes the scale estimate global. If the app forces separate files, record them as two takes and process them as two cases that are later rigidly aligned (worse; avoid).
 
-- **Rear camera, main lens, maximum resolution.** Set the phone to shoot the
-  highest-resolution stills it offers (48 MP ProRAW/HEIF Max on Pro models; 12 MP
-  otherwise). Do not use the ultra-wide or telephoto — switching lenses mid-set
-  breaks the single-camera assumption.
-- **Lock AE/AF before the first shot** (press and hold). A set shot without the
-  lock is invalid and gets rediscarded, not rescued.
-- **Zoom must be exactly 1.0× and untouched** for the whole set. Any zoom change
-  alters the effective focal length and invalidates `single_camera=1`.
-- **~80–120 photos**, three arcs:
-  - Arc 1 (~40 shots): eye level, ear to ear.
-  - Arc 2 (~30 shots): ~30° above, ear to ear.
-  - Arc 3 (~30 shots): ~30° below — the nasal base, columella and alar crease. This
-    arc carries the geometry that four of the six measurements depend on. Shoot it
-    densest.
-- **Overlap ≥ 70%** between consecutive shots — roughly one step every 4–6° of arc.
-- Distance 50–70 cm, consistent. Framing: head fills the frame with a small margin.
-- **Stop, settle, shoot.** Do not shoot while walking. Two seconds per position.
-- Subject seated, hair under a cap, eyes fixed on a marked point, **neutral face,
-  mouth closed, no talking**. Between arcs, let the subject relax and re-settle —
-  a 2-minute unbroken hold produces drift; three 40-second holds with resets do not.
-- Rigid ChArUco board on a headband (WP2), plain untextured background, diffuse even
-  lighting, matte skin.
-- **Burst mode is acceptable** as an accelerator for an arc, but only if the phone
-  writes full-resolution stills (many devices drop burst resolution — verify once on
-  the actual handset before trusting it).
-
-### 1.2 Ingest requirements
-
-`poc run ingest photos/ --out vaka_001` must:
-
-- Accept HEIC/HEIF, JPEG and DNG. Convert to sRGB JPEG q98 for COLMAP; keep originals untouched.
-- **Validate EXIF focal length is constant across the set.** If it is not, the set was shot with a lens or zoom change and `--ImageReader.single_camera 1` is silently wrong — the reconstruction will look plausible and be metrically wrong. Fail loudly, list the offending files.
-- Also assert constant image dimensions and constant ISO/exposure within a tolerance (proves the AE lock was actually engaged).
-- Blur rejection by Laplacian variance, same as before, but as an **absolute reject** rather than a per-window best-of — with stills there is no window to pick from, a blurred shot is simply dropped.
-- Report the surviving count and fail below 50.
-- Optional downscale factor for the MVS pass (48 MP × 100 images will not fit a T4's patch-match memory; ingest writes both a full-res set for ChArUco detection and a ~12 MP set for COLMAP).
-
-`ffmpeg` is no longer required for the main path. A `poc run frames video.mp4`
-entry point stays in the tree as a fallback for comparison experiments only, and is
-explicitly not the G1 path.
+### Phone settings
+- **Rear main lens. Zoom exactly 1.0×, never touched.** A lens switch mid-take changes the effective focal length and silently invalidates the single-camera assumption.
+- **AE/AF locked before recording starts.** A take without the lock is discarded, not rescued.
+- Highest resolution the recording path allows (see §2.3).
 
 ---
 
-## 2. Architecture: local-first, GPU only when unavoidable
+## 2. Scale without a fiducial
 
-The Colab free tier was exhausted mid-run once already, wiping `/content`. So we
-stop treating Colab as the machine and start treating it as an **accelerator we
-visit for two stages only**.
+COLMAP output is unitless. The marker was the external ruler; removing it means the ruler now comes from the phone's own metric tracking. Three independent estimates, one gate.
 
-Audit of what genuinely needs CUDA:
+### 2.0 First, the good news about *these six measurements*
 
-| Stage | Needs CUDA? | Where it runs |
+| Measurement | Scale-dependent? | Error at 1% scale error |
 |---|---|---|
-| (a) ingest — photo validation + blur reject | no | **local (M4 Pro)** |
-| (b) SfM — COLMAP feature/match/mapper | no (SIFT on 12 CPU cores is fine at ~100 images) | **local** |
-| (c1) MVS — `patch_match_stereo` | **yes, hard CUDA requirement** | **Colab T4** |
-| (c2) Gaussian splatting — gsplat | **yes** | **Colab T4** |
+| Nasofrontal angle | **no** — dimensionless | 0 |
+| Nasolabial angle | **no** — dimensionless | 0 |
+| Goode ratio | **no** — a ratio of two lengths | 0 |
+| Nasal length (~50 mm) | yes | 0.5 mm |
+| Nasal width (~35 mm) | yes | 0.35 mm |
+| Midline deviation (~2 mm) | yes | 0.02 mm |
+
+Half the measurement set is scale-invariant, and the metric half consists of **short** distances. Even a 2% scale error keeps every one of them under 1.1 mm — comfortably inside the 2 mm G1 bar and still inside the 1.5 mm G2 bar.
+
+This reframes the whole risk picture. The marker was buying precision on the axis where this particular measurement set is most forgiving. **With scale handled to ~1%, the dominant error term becomes landmark localization (WP4), not scale.** That is where the effort should go.
+
+This is an argument for marker-free being *sufficient*, not for being careless — a 5% scale failure still breaks G1, so the estimate must be verified per case, which is what §2.2 is for.
+
+### 2.1 Primary: metric camera trajectory (Umeyama)
+
+ARKit's VIO reports camera pose in **metres**, fusing IMU with camera. Reconstruct with COLMAP as usual, then estimate the similarity transform between the two camera-centre trajectories:
+
+- Take COLMAP camera centres `C_colmap[i]` and ARKit camera centres `C_arkit[i]` for the same frames.
+- Umeyama with scale → `s`, `R`, `t`. The scalar `s` is mm-per-COLMAP-unit.
+- **RANSAC over frame subsets**, because VIO occasionally glitches (a relocalization jump corrupts a handful of poses and would drag a least-squares fit).
+- Report inlier ratio and RMS residual after alignment.
+
+Why this is well-conditioned here: the two-person arc translates the camera **over a metre**, in a plane, with strong parallax — close to the ideal case for both VIO and for trajectory alignment. The old arm's-length self-orbit had a fraction of that baseline. **The two-person protocol is what makes marker-free scale viable**; these two changes belong together.
+
+### 2.2 Cross-check: LiDAR depth vs. reconstructed depth
+
+Fully independent of the trajectory, using the same capture:
+
+- For each frame, render/lookup COLMAP depth at pixels where the LiDAR **confidence map is high** and the **face mask** is true.
+- Robustly regress `depth_lidar ≈ s · depth_colmap` (Huber or median-of-ratios) across all frames.
+- iPhone LiDAR is 256×192 and roughly ±1 cm per sample, so no single reading is useful at our tolerance — but aggregated over ~10⁵ high-confidence correspondences the random component collapses. What survives is systematic bias, which is exactly what a second, differently-biased estimator is for.
+
+**Agreement gate:** if `|s_pose − s_depth| / s_pose > 1.5%`, mark the case `scale_unverified` and do not include it in the G1 table without inspection. This is the honest replacement for the marker's `side_spread_pct` — a per-case, self-reported quality number rather than a claim of trust.
+
+### 2.3 The capture-path decision
+
+The tension: LiDAR/pose recording apps cap RGB resolution, while the best photogrammetry input is the highest resolution the sensor offers.
+
+| Option | RGB | Poses | Verdict |
+|---|---|---|---|
+| **A. Stray Scanner** (LiDAR required) | 1920×1440 | ARKit poses + LiDAR depth + confidence + intrinsics, 30 fps | **Start here.** Everything §2.1 and §2.2 need, in one file, today. |
+| **B. Record3D** | ~720p–1440p depending on mode; works without LiDAR | ARKit poses, optional depth | Fallback if the handset has no LiDAR. |
+| **C. Minimal custom ARKit app** | **3840×2160 @ 30** via `recommendedVideoFormatFor4KResolution` (iPhone 11+, iOS 16+) | ARKit poses + LiDAR, same session | **The real answer.** ~250 lines of Swift. Also *is* the post-G1 production capture path. |
+| D. Plain 4K video, no pose data | 3840×2160 | none | **Not viable** — no scale source at all. |
+
+Is 1920×1440 enough for the PoC? At 65 cm the face spans roughly 60% of the 1440 axis, giving **≈4 px/mm**. That is ample for 2 mm geometry. Option A is not a compromise on accuracy for G1; it is a compromise on texture quality, which matters for WP7 and not for the measurements.
+
+**Sequencing:** Option A now to unblock WP1–WP4. Option C once the pipeline produces numbers — it lifts texture to 4K, removes the third-party-app dependency, and is work that has to happen for the product regardless. The handover excludes "iOS/Android apps" from PoC scope; a 250-line capture utility is not that app, and this plan treats it as tooling.
+
+### 2.4 Sanity checks (never scale sources)
+- IPD in the 55–70 mm band. Population variance is ±3–4 mm, so it can flag a gross failure and nothing finer.
+- Head bounding box 200–250 mm.
+- Both reported in `scale.json`; neither ever sets `s`.
+
+### 2.5 Rejected
+- **ArUco / ChArUco** — dropped per the new direction.
+- **Any known-size object in frame** — a fiducial by another name.
+- **Metric monocular depth networks** (Depth Pro, Metric3D v2) — 2–5% error, worse than both estimators above. Reconsider only if the handset has neither LiDAR nor usable VIO.
+
+---
+
+## 3. Reconstruction
+
+Unchanged in substance — COLMAP SfM → MVS → Poisson, with a gsplat track evaluated later — plus two upgrades that the ARKit data makes possible:
+
+- **Known intrinsics.** ARKit reports per-frame intrinsics. Feed them to COLMAP as a fixed camera rather than solving for them. Fewer free parameters, less chance of focal/distortion error being absorbed into geometry.
+- **Pose priors, if the mapper struggles.** ARKit poses can seed or constrain the mapper (or drive `point_triangulator` with fixed extrinsics). Hold this in reserve: VIO drift and rolling shutter make ARKit poses good priors and poor ground truth, so free-solve-then-align (§2.1) stays the default.
+
+Frame selection returns to the v1 approach — ffmpeg/decode at a fixed rate, Laplacian-variance blur rejection, best-frame-per-time-window so angular coverage is preserved. Target ~250–350 frames across both passes, weighted toward pass 2.
+
+---
+
+## 4. Execution split: local-first
+
+Only two stages genuinely need CUDA. Everything else runs on the M4 Pro (12 cores, 24 GB).
+
+| Stage | CUDA? | Runs on |
+|---|---|---|
+| (a) ingest — ARKit dataset parse, frame select, blur reject | no | **local** |
+| (b) SfM — COLMAP feature/match/mapper | no | **local** |
+| (c1) MVS — `patch_match_stereo` | **yes** | **Colab T4** |
+| (c2) Gaussian splatting | **yes** | **Colab T4** |
 | (d) masking — MediaPipe face parsing | no | **local** |
-| (e) scale — ChArUco detect + triangulate | no | **local** |
-| (f) FLAME fit | no, *if* written without PyTorch3D (see below) | **local (MPS/CPU)** |
-| (g) measure | no | **local** |
-| (h) export GLB | no | **local** |
-| report/compare | no | **local** |
+| (e) scale — Umeyama + depth regression | no | **local** |
+| (f) FLAME fit | no, written in plain PyTorch | **local (MPS)** |
+| (g) measure / (h) export / report | no | **local** |
 
-Two consequences worth stating plainly:
-
-1. **Drop PyTorch3D.** Its value here is chamfer distance + a mesh container, both
-   of which are ~40 lines of plain PyTorch plus an Open3D/scipy KD-tree. Keeping
-   PyTorch3D forces the riskiest, most iteration-heavy stage (FLAME fit) onto a
-   CUDA box, where every debug cycle costs Colab quota. Written in plain PyTorch it
-   runs on the M4 Pro via MPS in seconds per iteration, and stays portable to a
-   rented GPU later without change. This also deletes the "install a wheel matching
-   the CUDA version" failure mode from the handover.
-2. **Colab's job shrinks to one call:** `mvs` (and later `gsplat`). A session that
-   only runs MVS burns a fraction of the quota that a full end-to-end run does.
-
-Hardware on hand: Apple M4 Pro, 12 cores, 24 GB unified memory. Adequate for every
-local stage; the 24 GB is shared with the GPU so keep Poisson depth ≤10 and
-downsample the scan before the FLAME fit.
+**PyTorch3D stays dropped.** Chamfer distance plus a mesh container is ~40 lines of plain PyTorch and a KD-tree; keeping PyTorch3D would pin the most iteration-heavy stage to a CUDA box and burn Colab quota on every debug cycle. Colab's job is one command per case.
 
 ---
 
-## 3. Handoff protocol (local ⇄ Colab)
+## 5. Handoff (local ⇄ Colab)
 
-The **case directory is the unit of exchange**. Google Drive is the transport (the
-user already has `MyDrive/rhino-poc-data/`). Nothing binary goes into git.
+Case directory is the exchange unit; Drive is the transport; nothing binary goes into git.
 
 ```
 vaka_001/
-  case.json          <- NEW: manifest; which stages ran, when, with what params
-  photos_src/        <- originals, never modified
-  images/            <- ingest output, COLMAP-res, needed by Colab   (~100 jpg)
-  images_full/       <- ingest output, full-res, local only (ChArUco)
-  colmap/sparse/0/   <- local output, needed by Colab                (~5 MB)
-  colmap/dense/      <- Colab output (fused.ply), large, not synced back whole
-  mesh_raw.ply       <- Colab output, needed by local                (~40 MB)
-  scale.json         <- local
-  landmarks.json     <- local
-  model.glb          <- local
-  measurements.json  <- local
+  case.json          # manifest: stages, params, hashes, pass direction
+  arkit/             # raw Stray Scanner export (rgb, depth, confidence, odometry, intrinsics)
+  images/            # selected frames for COLMAP           -> Colab
+  masks/             # per-frame face masks                 -> Colab
+  colmap/sparse/0/   # local SfM output                     -> Colab
+  colmap/dense/      # Colab output (fused.ply), not synced back whole
+  mesh_raw.ply       # Colab output                         -> local
+  scale.json         # s_pose, s_depth, agreement, residuals, IPD, bbox
+  landmarks.json / model.glb / measurements.json
 ```
-
-Round trip:
 
 ```bash
 # LOCAL
-poc run ingest photos/ --out vaka_001
-poc run sfm            --out vaka_001
-poc pack               vaka_001 --for gpu     # -> vaka_001_gpu.zip (images + sparse only)
-# upload zip to Drive
+poc run ingest  vaka_001.r3d --out vaka_001      # or --stray <dir>
+poc run mask    --out vaka_001
+poc run sfm     --out vaka_001
+poc pack        vaka_001 --for gpu               # images + masks + sparse
 
-# COLAB (GPU runtime; setup cell + this)
-poc unpack /content/drive/.../vaka_001_gpu.zip --out /content/vaka_001
+# COLAB (GPU)
+poc unpack vaka_001_gpu.zip --out /content/vaka_001
 poc run mvs --out /content/vaka_001
-poc pack    /content/vaka_001 --for local     # -> mesh_raw.ply + logs only
-# writes back to Drive
+poc pack    /content/vaka_001 --for local        # mesh_raw.ply + logs
 
 # LOCAL
 poc unpack vaka_001_local.zip --out vaka_001
-poc run scale --out vaka_001 --board 5x7 --square-mm 12.0
-poc run flame --out vaka_001
+poc run scale   --out vaka_001                   # no --marker-mm any more
+poc run flame   --out vaka_001
 poc run measure --out vaka_001
 poc run export  --out vaka_001
 ```
 
-This requires a per-stage entry point (`poc run <stage>`) and `case.json` so a stage
-can verify its inputs exist and were produced with the parameters it expects.
-`poc process` stays as a convenience wrapper for a single-machine run.
-
 ---
 
-## 4. Work packages
+## 6. Work packages
 
-Ordered by risk-adjusted value. WP1–WP3 are the critical path to a first number.
+### WP0 — Local environment (half a day)
+- `brew install colmap ffmpeg` (no CUDA on macOS — expected; MVS is Colab's job).
+- Python 3.11 (system 3.9 is too old). `uv venv && uv pip install -e .` plus `mediapipe`, `torch`, `pymeshlab`, `scipy`.
+- **Acceptance:** `colmap -h` runs; `import cv2, open3d, trimesh, mediapipe, torch` clean; `torch.backends.mps.is_available()` is True.
+- Open the FLAME account now (`flame.is.tue.mpg.de`) — approval is not instant and WP4 blocks on it.
+- Install Stray Scanner (or Record3D) on the handset; confirm export reaches the Mac.
 
-### WP0 — Local environment (half a day, local)
-- `brew install colmap libheif exiftool` (COLMAP builds without CUDA on macOS — expected and fine; MVS is Colab's job). `ffmpeg` only if we keep the video fallback.
-- Python 3.11 via `uv` or `brew` — the system 3.9 is too old for the stack.
-- `uv venv && uv pip install -e .` plus `mediapipe`, `torch`, `pymeshlab`, `scipy`, `pillow-heif`, `piexif`.
-- **Acceptance:** `poc --help` runs; `colmap -h` runs; `python -c "import cv2,open3d,trimesh,mediapipe,torch"` clean; `torch.backends.mps.is_available()` is True; a HEIC file opens through `pillow-heif`.
-- Open a FLAME account now (`flame.is.tue.mpg.de`) — approval is not instant and WP4 blocks on it.
+### WP1 — ARKit ingest + stage runner + pack/unpack (2 days)
+- **New `pipeline/arkit.py`:** parse Stray Scanner (`rgb.mp4`, `depth/`, `confidence/`, `odometry.csv`, `camera_matrix.csv`) and Record3D `.r3d`. Emit a normalized `ArkitCapture`: per-frame metric pose (4×4), intrinsics, depth, confidence.
+- **`pipeline/frames.py`:** decode + blur-reject + window-best selection, carrying the ARKit frame index through so every selected image keeps its pose.
+- Refactor `cli.py` to `poc run <stage>`; `case.json` manifest; `poc pack/unpack`.
+- Split `--no-gpu` into `--sift-gpu/--no-sift-gpu`; `mvs` fails loudly with a readable message when CUDA is absent.
+- **Acceptance:** a case reruns with zero recomputation; every selected frame resolves to an ARKit pose; gpu zip < 400 MB.
 
-### WP1 — Photo ingest + stage runner + pack/unpack (1–2 days, local)
-- New `pipeline/ingest.py` per §1.2: HEIC/DNG decode, EXIF focal/dimension/exposure validation, blur reject, dual-resolution output, coverage report.
-- Demote `pipeline/frames.py` to the video fallback path; it stays, it is not the G1 route.
-- Refactor `cli.py`: `poc run <stage>` with explicit inputs, `poc process` calling it in sequence.
-- `case.json` manifest: stage name, timestamp, parameters, output hashes.
-- `poc pack --for gpu|local`, `poc unpack`.
-- Decouple `--no-gpu`: currently one flag gates both SfM SIFT and implies MVS is dead. Split into `--sift-gpu/--no-sift-gpu`; MVS just fails loudly with a clear message if CUDA is absent.
-- **Matcher change:** with an unordered still set, `sequential_matcher` is no longer the obvious default. At ~100 images `exhaustive_matcher` is affordable and strictly more robust; make it the default and keep `sequential` as an option for filename-ordered arcs.
-- **Acceptance:** `vaka_001` reruns end-to-end from an existing case folder with zero recomputation; a packed gpu zip is < 400 MB; a deliberately lens-switched photo set is rejected with a readable error.
+### WP2 — Marker-free scale (2 days) — *rebuilt from scratch*
+- **Delete `scripts/make_aruco.py` and the ArUco path in `scale.py`.**
+- `scale_from_poses()` — RANSAC Umeyama over camera centres → `s_pose`, inlier ratio, RMS residual (§2.1).
+- `scale_from_depth()` — robust `depth_lidar ≈ s·depth_colmap` regression over high-confidence, in-mask pixels → `s_depth` (§2.2).
+- `compute_scale()` — combine, apply the 1.5% agreement gate, write IPD and bbox sanity, set `scale_verified`.
+- **Acceptance:** same subject captured 3× yields `s` within **1%** across takes, and `|s_pose − s_depth|` within 1.5% on every take.
+- **If the handset has no LiDAR:** `s_depth` is unavailable and the gate degrades to repeatability across takes. Say so in the report rather than quietly dropping the check.
 
-### WP2 — Scale: ArUco → ChArUco (1–2 days, local) — *highest-risk-per-hour*
-The handover's diagnosis stands: a paper marker bends on a curved forehead, default
-corner refinement is off, and 4 corners are too few. Fix in this order:
-1. **Rigid mount.** Board on rigid card, card on a headband. Not on skin. This alone may be most of the error.
-2. **`cornerRefinementMethod = CORNER_REFINE_SUBPIX`** — one line, currently missing in `scale.py` (it passes a default `DetectorParameters()`). Full-resolution stills make this refinement far more effective than it could ever be on 1080p video frames.
-3. **ChArUco board** (`scripts/make_charuco.py`, e.g. 5×7, 12 mm squares): chessboard corners are subpixel-accurate and there are dozens of them. Triangulate every corner, fit a plane, and derive scale by **least-squares fit of all inter-corner distances** against the known board geometry — not from a single edge.
-4. Detect on `images_full/`, not the downscaled COLMAP set; map corners back through the known scale factor. This is the whole reason ingest keeps two resolutions.
-5. Report `scale_residual_mm` (RMS of fitted vs. known distances) in `scale.json`. This is the honest per-case scale-quality number; `side_spread_pct` is the weaker single-marker version of it.
-- **Cross-check (do it once, early):** if an iPhone Pro is available, capture the same subject with Record3D / Stray Scanner, align COLMAP poses to the metric ARKit poses with Umeyama, and compare the two scale factors. Agreement within ~1% means the marker path is trustworthy; disagreement means stop and fix scale before touching FLAME. This also de-risks the intended post-G1 production path.
-- IPD stays a **sanity check only** (55–70 mm), never the scale source.
-- **Acceptance:** the same subject captured 3× gives scale factors within 1% of each other, and `scale_residual_mm` < 0.5 mm.
-
-### WP3 — Masking + mesh cleanup (1 day, local)
-- MediaPipe face parsing / selfie segmentation per image → per-image mask.
-- Apply as a COLMAP `--mask_path` before MVS (better: kills hair/background at the source, cheaper than post-filtering), plus a fused.ply back-projection filter as fallback.
+### WP3 — Masking + mesh cleanup (1 day)
+- MediaPipe face parsing per selected frame → masks, fed to COLMAP as `--mask_path` (kills hair and the now-deliberately-textured background at the source).
 - Open3D statistical outlier removal + largest connected component; PyMeshLab island removal, hole fill, non-manifold repair.
-- **Acceptance:** `mesh_raw.ply` contains face + neck only, no hair strands, no background sheet, watertight enough for the fit.
+- Masks are also required by §2.2, so this lands **before** WP2 completes.
+- **Acceptance:** `mesh_raw.ply` is face + neck only, no hair, no room.
 
-### WP4 — FLAME registration (3–5 days, local, MPS) — *riskiest stage*
-Blocked on FLAME approval (WP0).
-1. MediaPipe Face Landmarker → 2D landmarks per image.
-2. Triangulate to 3D using COLMAP poses (reuse `scale.py`'s DLT), median across images, reject outlier views.
-3. Umeyama alignment **without scale** — the scan is already in mm from WP2; letting Umeyama solve scale would silently absorb our metric error and make the measurements look better than they are. This matters: it is the difference between measuring the face and measuring the template.
-4. Non-rigid fit, plain PyTorch on MPS: chamfer (KD-tree nearest-neighbour, recomputed every N iters) + landmark L2 + shape/expression regularization. Staged unlocking — rigid → shape → expression → per-vertex offsets. Adam, ~500–1000 iters.
-5. Read the 11 anatomical points from **fixed FLAME vertex indices** → `landmarks.json`.
-- **Acceptance:** median point-to-surface distance between the fitted FLAME and the masked scan, over the nasal region only, < 1.0 mm. Report it per case — it is the internal quality gate that predicts the caliper result before any caliper is picked up.
-- **Fallback if the fit fights us:** measure directly off the cleaned scan using landmarks triangulated in step 2. Loses the under-the-skin capability and repeatability, but produces a G1 number. Decide by end of week 3, not later.
+### WP4 — FLAME registration (4–6 days, local/MPS) — *now the dominant error term*
+1. MediaPipe Face Landmarker → 2D landmarks per frame.
+2. Triangulate to 3D with COLMAP poses, median across frames, reject outlier views.
+3. Umeyama **without scale** — the scan is already metric from WP2. Letting the fit solve scale would absorb our metric error and flatter the result.
+4. Non-rigid fit, plain PyTorch on MPS: chamfer (KD-tree NN, refreshed every N iters) + landmark L2 + shape/expression regularization. Staged unlocking: rigid → shape → expression → per-vertex offsets. Adam, 500–1000 iters.
+5. Read the 11 anatomical points from fixed FLAME vertex indices → `landmarks.json`.
+- **Acceptance:** median point-to-surface distance, fitted FLAME vs. masked scan, **nasal region only**, < 1.0 mm, reported per case. This is the internal gate that predicts the caliper result.
+- **Fallback:** measure directly off the cleaned scan using the step-2 landmarks. Loses under-the-skin capability and some repeatability, but produces a G1 number. Decide by end of week 3.
+- Budget increased over v3 by design — per §2.0, this is where accuracy is now won or lost.
 
-### WP5 — Measurement + error report (1 day, local)
-- `measure.py` is written and correct; it just needs `landmarks.json`.
-- Fill `data/calipers_template.csv` from the surgeon's blind caliper session.
-- `report/compare.py` already computes per-measurement median/MAE and checks the 2 mm bar. Extend it with: per-case pass/fail, a Bland–Altman plot, and a repeatability column (same subject, 3 captures) — repeatability is what a surgeon will actually challenge.
-- **Acceptance:** the G1 table for 10 subjects, produced by one command.
+### WP5 — Measurement + error report (1 day)
+- `measure.py` is written and correct; it needs `landmarks.json`.
+- Extend `report/compare.py`: per-case pass/fail, Bland–Altman, and a **repeatability column** (same subject × 3 takes). With scale now self-reported rather than externally certified, repeatability is the strongest evidence we can offer a surgeon.
+- **Acceptance:** the 10-subject G1 table from one command.
 
-### WP6 — Gaussian splatting track (2–3 days, Colab) — *only after WP4 has a number*
-- COLMAP poses → nerfstudio format, train splatfacto (15–20k steps on T4), surface extraction (2DGS/SuGaR-class).
-- Compare against the MVS mesh on the **same** WP4 acceptance metric.
-- **Decision point:** pick one track. Do not carry both past this.
-- Deliberately last: it costs GPU quota and only matters if MVS is the accuracy bottleneck, which WP4's per-case surface-distance number will tell us.
+### WP6 — Gaussian splatting track (2–3 days, Colab) — only after WP4 has a number
+- COLMAP poses → nerfstudio, splatfacto 15–20k steps on T4, surface extraction; compare on the **same** WP4 metric. Pick one track; do not carry both.
 
-### WP7 — Textured GLB + viewer (2 days)
-- Texture bake in trimesh (Open3D's GLB export is weak — handover decision stands). Full-resolution stills give a materially better texture than video frames ever could; this is a free side benefit of §1.
-- Minimal three.js page, measurement overlay. **No UI work beyond this** — explicitly out of scope.
+### WP7 — Texture + viewer (2 days)
+- Texture bake in trimesh. Revisit after Option C (4K) — texture is the one thing 1920×1440 genuinely limits.
+- Minimal three.js page with measurement overlay. **No UI work beyond this.**
 
-### WP8 — Escape from Colab (when numbers get serious)
-- Same code, Docker image, RunPod/Lambda 24 GB. Only `mvs` and `gsplat` ever run there. No code change expected — that is the point of WP1's stage split.
+### WP8 — Custom ARKit capture app (Option C, 3–4 days, Swift)
+- `ARWorldTrackingConfiguration` + `recommendedVideoFormatFor4KResolution`, LiDAR depth, per-frame pose/intrinsics, single continuous session across both passes, on-device pass-quality checks (AE/AF lock, pace, coverage).
+- Schedule after G1 unless texture or third-party export becomes the blocker sooner. This is the production capture path.
 
 ---
 
-## 5. Timeline
+## 7. Timeline
 
 | Week | Local | Colab |
 |---|---|---|
-| 1 | WP0, WP1, WP2 | one `mvs` run to unblock WP2 |
-| 2 | WP2 finish, WP3 | `mvs` per new capture |
+| 1 | WP0, WP1 | one `mvs` to unblock WP2/WP3 |
+| 2 | WP3, WP2 | `mvs` per take |
 | 3 | WP4 | — |
 | 4 | WP4 finish, WP5 | WP6 if WP4 says MVS is the bottleneck |
-| 5 | 10-subject capture + caliper session | `mvs` ×10 |
+| 5 | 10-subject capture + blind caliper session | `mvs` ×10 |
 | 6 | WP5 report → **G1 gate** | — |
 
 ---
 
-## 6. Risk register
+## 8. Risk register
 
 | Risk | Probability | Impact | Mitigation |
 |---|---|---|---|
-| Marker scale error > 1 mm | **high** (already observed) | kills every mm measurement | WP2: rigid mount + ChArUco + full-res detection + ARKit cross-check |
-| **Subject drifts during the longer still-photo hold** | **medium-high** (new, from §1) | non-rigid scene → SfM fails or warps | three short arcs with resets, not one long hold; eyes on a fixed mark; reshoot without argument |
-| **Lens/zoom change mid-set breaks `single_camera=1`** | medium (new) | metrically wrong yet plausible-looking reconstruction | WP1 ingest validates EXIF focal length and fails loudly |
-| FLAME fit doesn't converge on the nose | medium | no repeatable landmarks | WP4 fallback: measure off the raw scan |
-| Colab quota exhausted mid-run | **high** (already happened) | lost session | local-first architecture; Colab touches one stage |
-| MVS mesh too smooth at the alar crease | medium | nasal width error | dense arc-3 coverage; WP6 gsplat track exists for exactly this |
-| 48 MP × 100 images exceeds T4 patch-match memory | medium | MVS OOM | ingest writes a ~12 MP COLMAP set alongside the full-res set |
-| FLAME license blocks commercialization | low for PoC, **certain later** | product-level | flagged to the solution partner now, not at G1 |
+| **ARKit VIO scale error > 2%** | medium | metric measurements drift | §2.2 depth cross-check + 3-take repeatability; §2.0 shows even 2% stays under the bar |
+| **Handset has no LiDAR** | *unknown — see §10* | loses the independent cross-check | Record3D VIO-only path; gate degrades to repeatability, stated openly in the report |
+| **Subject moves during a pass** | medium | non-rigid scene → SfM fails or warps | two short passes with a reset; headrest; eyes on a fixed mark; reshoot without argument |
+| Landmark localization error | **high** | now the dominant error term | WP4 budget increased; nasal-region surface-distance gate per case |
+| Lens/zoom change mid-take | medium | metrically wrong yet plausible reconstruction | ingest validates constant intrinsics across the ARKit stream |
+| Featureless background breaks VIO | medium | no metric poses at all | protocol reversed to require a static **textured** background |
+| Colab quota exhausted mid-run | **high** (happened once) | lost session | local-first; Colab touches one stage |
+| MVS too smooth at the alar crease | medium | nasal width error | dense pass-2 coverage; WP6 exists for this |
+| FLAME licence blocks commercialization | certain, later | product-level | flagged to the solution partner now, not at G1 |
 
 ---
 
-## 7. Open questions for the surgeon (before the caliper session)
+## 9. What was removed, and why it is recoverable
 
-1. Exact landmark definitions for all 6 measurements, in writing, signed. `measure.py` already encodes one interpretation (e.g. Goode = alar-crease-to-tip over nasion-to-tip); it must match theirs or every error number is meaningless.
-2. Caliper session must be blind and, ideally, two observers — so we can report inter-observer variability alongside our error. If the caliper's own repeatability is ±1.5 mm, a 2 mm target needs restating.
+The marker gave one thing this plan no longer has: an **externally certified** ruler, independent of the phone. Everything in §2 is the phone measuring itself, and two estimators derived from the same hardware can share a bias that neither will reveal.
+
+The mitigation is deliberately not another marker. It is **one calibration exercise, once**: capture a rigid object of precisely known dimensions (a machined block, or a printed checkerboard measured with calipers — used as a *validation target*, never in a patient capture) through the full pipeline, and confirm the recovered scale against its true size. That converts "two estimators agree" into "the system is known accurate to X%", and it never touches the clinical protocol. Half a day, worth doing in week 2.
+
+---
+
+## 10. Open questions
+
+1. **Which iPhone is available for capture?** LiDAR requires a Pro model (12 Pro or later) or an iPad Pro. With LiDAR: §2.2 cross-check works, plus a depth prior for low-texture cheeks and forehead. Without it: ARKit VIO still gives metric poses via Record3D and §2.1 stands alone. This changes WP2's acceptance criteria, so it is the one answer needed before WP2 starts.
+2. **Exact landmark definitions for the six measurements, in writing, signed by the surgeon.** `measure.py` encodes one interpretation (e.g. Goode = alar-crease-to-tip ÷ nasion-to-tip); if it differs from theirs, every error number is meaningless.
+3. **Blind caliper session with two observers**, so inter-observer variability is reported alongside our error. If the caliper's own repeatability is ±1.5 mm, a 2 mm target needs restating.

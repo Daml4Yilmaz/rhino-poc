@@ -1,24 +1,25 @@
 """Pipeline parametreleri — tek yerden ayarlanir."""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
 
 @dataclass
 class Config:
-    # Kare cikarma / secim
-    extract_fps: int = 15          # 20-30 sn video @15fps -> 300-450 ham kare
-    n_frames: int = 200            # secilecek iyi kare sayisi
+    # Kare secimi (fotogrametrinin girdisi)
+    n_frames: int = 300            # iki gecis boyunca secilecek keskin kare
     blur_min_var: float = 40.0     # Laplacian varyans alt esigi (mutlak ret)
+    max_dim: int | None = 1600     # COLMAP'e verilen karenin uzun kenari
 
-    # ArUco olcek
-    marker_dict: str = "DICT_4X4_50"
-    marker_id: int = 0
-    marker_mm: float = 50.0        # BASILI marker'in CETVELLE OLCULMUS kenar uzunlugu!
+    # Markersiz olcek (ARKit poz + LiDAR; bkz. pipeline/scale.py)
+    scale_agreement_pct: float = 1.5   # poz/LiDAR ayrisma esigi
+    depth_conf_min: int = 2            # LiDAR guven haritasi: 2 = yuksek
 
     # COLMAP
     colmap_bin: str = "colmap"
     camera_model: str = "OPENCV"
-    seq_overlap: int = 15          # video icin sequential matching penceresi
+    seq_overlap: int = 20          # video karesi -> sirali eslestirme penceresi
     use_gpu: bool = True
 
     # Poisson mesh
@@ -29,6 +30,8 @@ class Config:
     out_dir: Path = field(default_factory=lambda: Path("vaka_out"))
 
     def frames_dir(self) -> Path: return self.out_dir / "frames"
+    def frames_index(self) -> Path: return self.out_dir / "frames_index.json"
+    def masks_dir(self) -> Path: return self.out_dir / "masks"
     def colmap_dir(self) -> Path: return self.out_dir / "colmap"
     def sparse_dir(self) -> Path: return self.colmap_dir() / "sparse"
     def dense_dir(self) -> Path: return self.colmap_dir() / "dense"

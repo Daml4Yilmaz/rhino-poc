@@ -2,57 +2,104 @@
 
 Telefonla çekilmiş video → gerçek ölçekli 3D yüz modeli + 6 otomatik rinoplasti ölçümü + kumpasla karşılaştırmalı hata raporu.
 
-Tek komut: `poc process video.mp4 --out vaka_001 --marker-mm 50`
+**Yöntem: fotogrametri.** Video kareye ayrılır ("ekran görüntüsü"), 3D model bu karelerden COLMAP SfM + MVS ile üretilir. Marker (ArUco/ChArUco) **kullanılmaz**.
 
-## Kurulum (Google Colab)
+Fotogrametri şekli verir, **milimetreyi vermez** — aynı kareler 50 mm'lik burunla da 500 mm'lik burunla da tutarlıdır; mutlak boyut görüntülerin içinde yoktur. Marker olmadığı için mm çarpanı telefonun kendi metrik takibinden (ARKit VIO + LiDAR) okunur. Bu veri modeli **üretmez**, sadece "1 COLMAP birimi kaç mm" sayısını verir. Ayrıntı: `poc/pipeline/scale.py`.
 
-1. Bu klasörü Drive'a `MyDrive/rhino-poc` olarak yükle.
-2. `colab_setup.ipynb`'yi Colab'da aç (GPU runtime), hücreleri sırayla koş.
-3. İlk oturumda COLMAP kurulumu uzun sürebilir; sonucu Drive'a cache'lenir.
+Tek komut: `poc process <yakalama> --out vaka_001`
 
-Colab notları: oturum diski geçicidir — video ve çıktılar Drive'da tutulur. Docker yok; ortam notebook ile kurulur. Rakamlar ciddiye binince aynı repo değişiklik olmadan kiralık GPU'ya (RunPod vb.) taşınabilir.
+## Çekim protokolü — iki kişi, iki geçiş
 
-## Çekim protokolü (kontrol listesi)
+Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
 
-- [ ] 1080p / 60 fps, telefonun kendi kamerası
-- [ ] Çekimden önce ekrana basılı tut → **AE/AF kilidi** (sarı kilit simgesi)
-- [ ] Denek oturur, saç bone/bant altında, **yüz ifadesiz, ağız kapalı**, sabit noktaya bakar
-- [ ] Alına basılı ArUco (mat kağıt, düz yapıştırılmış, kıvrımsız)
-- [ ] Kol mesafesinden, 20-30 saniyede kulaktan kulağa **yavaş** tur
-- [ ] Burun tabanı için hafif alttan ikinci kısa geçiş
-- [ ] Düz fon, dağınık eşit ışık, mat cilt (gerekirse pudra)
+**Hazırlık**
+- [ ] Denek oturur, sırt dayalı, ayaklar yerde (başlıklı koltuk daha iyi)
+- [ ] Saç tamamen bone altında, kulaklar açıkta, gözlük/küpe yok
+- [ ] Gözler **3 m ötede işaretli bir noktada** sabit — telefonu takip etmek başı döndürür
+- [ ] **İfadesiz yüz, ağız kapalı, konuşma yok** (SfM hareketli sahnede çöker)
+- [ ] Mat cilt (parlıyorsa şeffaf pudra) — parlamalar kamerayla birlikte hareket eder ve geometri sanılır
 
-ArUco baskısı: `python scripts/make_aruco.py --mm 50` → %100 ölçekle bas → **kenarı cetvelle ölç** → ölçtüğün değeri `--marker-mm`'e ver.
+**Ortam (önceki sürümlerden değişti)**
+- [ ] Arka plan **sabit ve DOKULU** — düz/boş fon değil. ARKit'in takibi ortam özniteliği ister; denek sabit olduğu için oda ve yüz tek bir katı sahne oluşturur ve arka plan SfM'e de yardım eder. Fon geometrisi sonradan maskelenir (ucuz); bozuk takip geri gelmez.
+- [ ] Karede hareket eden hiçbir şey yok (başka kişi, ekran, pencere)
+- [ ] Dağınık, eşit ve **sabit** ışık; bantlanma (flicker) olmadığını doğrula
+
+**Telefon**
+- [ ] Arka ana kamera, **zoom tam 1.0×** ve hiç dokunulmadan (lens değişimi odak uzaklığını değiştirir, tek-kamera varsayımını sessizce bozar)
+- [ ] Kayıttan **önce AE/AF kilidi** (basılı tut). Kilitsiz çekim geçersizdir.
+- [ ] Kayıt uygulaması: **Stray Scanner** (LiDAR şart) veya Record3D — video + ARKit pozu birlikte kaydedilmeli
+
+**Geçiş 1 — göz hizası, kulaktan kulağa**
+- [ ] Sağ kulaktan sol kulağa (ya da tersi — `case.json`'a yazılır), 180°
+- [ ] Kamera deneğin **göz hizasında**, lens buruna dönük
+- [ ] Mesafe **60–70 cm**, sabit
+- [ ] **25–35 sn**, topuk-parmak yürüyüş, iki el telefonda, dirsekler gövdeye dayalı
+- [ ] Duraklama zararsız; ani hızlanma zararlı (kare bulanır, takip sarsılır)
+
+**Geçiş 2 — alçak açı, yukarı eğik (burun tabanı)**
+- [ ] Kamera deneğin göğüs/çene hizasına iner, **~30° yukarı eğik** — iki burun deliği, kolumella ve alar oluk net görünmeli
+- [ ] Aynı yay, **15–25 sn**, aynı mesafe
+- [ ] 6 ölçümün dördü bu geçişin geometrisine dayanır. Tekrar çekilecek tek geçiş varsa budur.
+
+**Geçişler arası:** deneği gevşet, sonra yeniden yerleştir ve işarete odaklat. İki kısa duruş, tek uzun duruştan iyidir. **Kaydı geçişler arasında durdurma** — tek oturum tek metrik çerçeve demektir, ölçek bunun üstüne kurulur.
+
+## Kurulum
+
+**Yerel (macOS, M-serisi) — GPU gerektirmeyen her şey burada koşar**
+```bash
+brew install colmap
+uv venv && uv pip install -e .
+poc process vaka_001_stray/ --out vaka_001 --no-sift-gpu --until sfm
+```
+
+**Colab (sadece GPU gereken adımlar: `mvs`, ileride `gsplat`)**
+1. Vaka klasörünü Drive'a yükle, `colab_setup.ipynb`'yi GPU runtime ile aç.
+2. `poc process ... --until mvs --resume` → `mesh_raw.ply`.
+3. Sonucu yerele indirip kalan adımları burada koş.
+
+Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. Geri kalan her şey M4 Pro'da koşar; Colab'ın ücretsiz kotası bir kez oturum ortasında tükendiği için Colab'a tek adım devredilir. Ayrıntı: `PLAN.md` §4.
 
 ## Pipeline durumu
 
 | Adım | Modül | Durum |
 |---|---|---|
-| (a) Kare çıkarma + bulanıklık eleme | `pipeline/frames.py` | hazır |
+| (a) Kare çıkarma + bulanıklık eleme | `pipeline/frames.py` | hazır (kaynak kare indeksi korunur) |
+| ARKit yakalama okuma (Stray/Record3D) | `pipeline/arkit.py` | hazır |
 | (b) COLMAP SfM | `pipeline/sfm.py` | hazır |
-| (c1) COLMAP MVS + Poisson | `pipeline/mvs.py` | hazır (CUDA'lı COLMAP gerekir) |
-| (c2) Gaussian splatting hattı | `pipeline/gsplat.py` | hafta 2 stub |
-| (d) Saç/fon maskeleme | `pipeline/masking.py` | hafta 2 stub |
-| (e) ArUco ölçek | `pipeline/scale.py` | hazır |
-| (f) FLAME kaydı → landmarks.json | `pipeline/flame_fit.py` | hafta 2 stub (FLAME hesabını şimdiden aç: flame.is.tue.mpg.de) |
+| (c1) COLMAP MVS + Poisson | `pipeline/mvs.py` | hazır (CUDA gerekir → Colab) |
+| (c2) Gaussian splatting hattı | `pipeline/gsplat.py` | stub |
+| (d) Saç/fon maskeleme | `pipeline/masking.py` | stub |
+| (e) Markersiz ölçek (ARKit poz + LiDAR) | `pipeline/scale.py` | hazır |
+| (f) FLAME kaydı → landmarks.json | `pipeline/flame_fit.py` | stub (FLAME hesabını aç: flame.is.tue.mpg.de) |
 | (g) 6 ölçüm | `pipeline/measure.py` | hazır (landmarks.json bekler) |
-| (h) GLB export | `pipeline/export.py` | hazır (doku hafta 2-3) |
+| (h) GLB export | `pipeline/export.py` | hazır (doku sonra) |
 | Hata raporu | `report/compare.py` | hazır |
-| Web demo (FastAPI + Three.js) | — | hafta 4 |
+
+## Ölçek doğrulaması
+
+`scale.json` iki **bağımsız** tahmin ve aralarındaki uyumu yazar:
+
+- `s_pose_m_per_unit` — COLMAP ve ARKit kamera yörüngeleri arasındaki benzerlik ölçeği (ikili mesafe oranlarının medyanı; VIO dönme kaymasına karşı dayanıklı)
+- `s_depth_m_per_unit` — LiDAR derinliği / COLMAP derinliği oranı, yüksek güvenli piksellerde
+- `agreement_pct` — ikisi arasındaki fark. **%1.5 üstü → `scale_verified=false`**, vaka incelenmeden G1 tablosuna girmez.
+
+`ipd_mm` (55–70 mm) ve `bbox_mm` (150–320 mm) yalnızca **makullük kontrolüdür**, ölçeği asla belirlemez.
 
 ## Kullanım
 
 ```bash
-poc process vaka_001.mp4 --out vaka_001 --marker-mm 49.5
-poc process vaka_001.mp4 --out vaka_001 --until sfm     # erken dur
+poc process vaka_001_stray/ --out vaka_001
+poc process vaka_001_stray/ --out vaka_001 --until sfm      # erken dur
+poc scale   vaka_001_stray/ --out vaka_001                  # sadece ölçek
 poc measure vaka_001/landmarks.json --out vaka_001/measurements.json
 python -m poc.report.compare calipers.csv vaka_001 vaka_002
 ```
 
 Kumpas değerleri: `data/calipers_template.csv`'yi kopyala, doldur.
 
-## Hafta 1 başarı kontrolü
+## İlk başarı kontrolü
 
-1. `sfm` ≥150 kare kaydediyor, `mvs` delik(siz)e yakın yüz yüzeyi veriyor.
-2. `scale.json` → `side_spread_pct` < 5.
-3. `model.glb`'de gözbebeği arası ~60-70 mm (makullük), kafa bbox ~200-250 mm.
+1. `arkit` çıktısı: >300 kare, yol >1.5 m, LiDAR "var".
+2. `sfm` ≥200 kare kaydediyor.
+3. `scale.json` → `agreement_pct` < 1.5 ve `scale_verified: true`.
+4. `model.glb` bbox ~200–250 mm; aynı denek 3 kez çekildiğinde ölçek %1 içinde tekrar ediyor.
