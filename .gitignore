@@ -6,3 +6,13 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+
+# Vaka verisi ve ara ciktilar — repoya girmez (Drive uzerinden tasinir)
+vaka_*/
+*.ply
+*.glb
+*.r3d
+*_stray/
+
+# Devir raporu: butce ve ticari detay iceriyor, repo PUBLIC
+HANDOVER_claude_code.md
