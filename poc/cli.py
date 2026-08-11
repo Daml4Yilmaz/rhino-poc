@@ -22,9 +22,12 @@ app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
 STEPS = ["frames", "sfm", "mvs", "scale", "export", "measure"]
 
 
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi"}
+
+
 @app.command()
 def process(
-    capture: Path = typer.Argument(..., help="Stray Scanner klasoru veya Record3D .r3d"),
+    capture: Path = typer.Argument(..., help="Stray Scanner klasoru, .r3d, veya duz video (TEST)"),
     out: Path = typer.Option(..., "--out", help="Vaka cikti klasoru"),
     n_frames: int = typer.Option(300, help="Secilecek kare sayisi"),
     max_dim: int = typer.Option(1600, help="COLMAP karesinin uzun kenari (0=kucultme)"),
@@ -40,15 +43,27 @@ def process(
     out.mkdir(parents=True, exist_ok=True)
     stop = STEPS.index(until)
 
-    from .pipeline.arkit import load_capture
-    cap = load_capture(capture)
+    # Girdi ya ARKit yakalamasi ya da (SADECE TEST icin) duz video.
+    test_mode = capture.is_file() and capture.suffix.lower() in VIDEO_SUFFIXES
+    if test_mode:
+        print("=" * 70)
+        print("[poc] TEST MODU: duz video — ARKit pozu yok, LiDAR yok.")
+        print("[poc] Fotogrametri (frames+sfm+mvs) kosar, OLCEK KOSMAZ.")
+        print("[poc] Cikan model BIRIMSIZ olur: acilar ve Goode orani anlamli,")
+        print("[poc] mm cinsinden uzunluk/genislik/sapma URETILEMEZ.")
+        print("=" * 70)
+        video, cap = capture, None
+    else:
+        from .pipeline.arkit import load_capture
+        cap = load_capture(capture)
+        video = cap.rgb_path
 
     # 1. frames — videodan kare cikar (kaynak kare indeksleri korunur)
     if resume and cfg.frames_index().exists():
         print(f"[frames] atlandi (resume): {cfg.frames_dir()} mevcut")
     else:
         from .pipeline.frames import select_frames
-        select_frames(cap.rgb_path, cfg.frames_dir(), cfg.n_frames,
+        select_frames(video, cfg.frames_dir(), cfg.n_frames,
                       cfg.blur_min_var, cfg.max_dim, cfg.frames_index())
     if stop < 1:
         return _done(t0)
@@ -77,7 +92,10 @@ def process(
 
     # 4. scale — markersiz: ARKit poz (+ LiDAR capraz kontrol)
     scale_json = out / "scale.json"
-    if resume and scale_json.exists():
+    if test_mode:
+        print("[scale] TEST MODU — atlandi. Model birimsiz kalacak.")
+        scale = 1.0
+    elif resume and scale_json.exists():
         scale = json.loads(scale_json.read_text())["scale_mm_per_unit"]
         print(f"[scale] atlandi (resume): {scale:.6f} mm/birim")
     else:
@@ -88,9 +106,10 @@ def process(
     if stop < 4:
         return _done(t0)
 
-    # 5. export (mm olcekli GLB)
+    # 5. export — test modunda birimsiz oldugunu dosya adindan belli et
     from .pipeline.export import export_glb
-    export_glb(mesh_raw, scale, out / "model.glb")
+    glb = out / ("model_unitless.glb" if test_mode else "model.glb")
+    export_glb(mesh_raw, scale, glb)
     if stop < 5:
         return _done(t0)
 

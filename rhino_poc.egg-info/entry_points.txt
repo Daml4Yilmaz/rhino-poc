@@ -1,0 +1,2 @@
+[console_scripts]
+poc = poc.cli:app

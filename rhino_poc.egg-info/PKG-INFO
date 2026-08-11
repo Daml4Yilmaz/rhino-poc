@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: rhino-poc
+Version: 0.1.0
+Summary: Telefon videosundan gercek olcekli 3D yuz modeli + 6 rinoplasti olcumu (PoC)
+Requires-Python: >=3.10
+Requires-Dist: typer>=0.9
+Requires-Dist: numpy
+Requires-Dist: opencv-contrib-python
+Requires-Dist: open3d
+Requires-Dist: trimesh
+Requires-Dist: pycolmap
+Requires-Dist: pandas
+Requires-Dist: pillow
