@@ -5,6 +5,7 @@ adim calismaz (notebook'taki kurulum notuna bak).
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -25,11 +26,30 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     dense_dir.mkdir(parents=True, exist_ok=True)
     log = dense_dir.parent / "colmap.log"
 
-    _run([colmap_bin, "image_undistorter",
-          "--image_path", str(frames_dir),
-          "--input_path", str(sparse_model),
-          "--output_path", str(dense_dir),
-          "--output_type", "COLMAP"], log)
+    # image_undistorter var olan dosyanin uzerine YAZMAZ; onceki yarim kalmis
+    # kosudan kalan dense/images yuzunden "filesystem error: File exists" ile
+    # SIGABRT verir. Kopan bir Colab oturumundan sonra tam olarak bu olur.
+    #
+    # dense/ klasorunu topluca SILMIYORUZ: pahali olan stereo/depth_maps orada
+    # ve COLMAP hazir olanlari kendisi atlayip devam edebiliyor. Sadece images
+    # klasorunu ele aliyoruz.
+    import pycolmap
+    n_expected = pycolmap.Reconstruction(str(sparse_model)).num_reg_images()
+    images_dst = dense_dir / "images"
+    n_have = len(list(images_dst.glob("*"))) if images_dst.is_dir() else 0
+
+    if n_have == n_expected and (dense_dir / "sparse").exists():
+        print(f"[mvs] undistort atlandi: {n_have} goruntu zaten hazir")
+    else:
+        if images_dst.exists():
+            print(f"[mvs] yarim undistort temizleniyor ({n_have}/{n_expected} "
+                  "goruntu) — derinlik haritalari korunuyor")
+            shutil.rmtree(images_dst)
+        _run([colmap_bin, "image_undistorter",
+              "--image_path", str(frames_dir),
+              "--input_path", str(sparse_model),
+              "--output_path", str(dense_dir),
+              "--output_type", "COLMAP"], log)
 
     _run([colmap_bin, "patch_match_stereo",
           "--workspace_path", str(dense_dir),
