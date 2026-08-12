@@ -105,8 +105,12 @@ def process(
         print(f"[sfm] atlandi (resume): {model} mevcut")
     else:
         from .pipeline.sfm import run_sfm
+        fmap = None
+        if cap is not None and cfg.frames_index().exists():
+            fmap = json.loads(cfg.frames_index().read_text())["frame_of_image"]
         model = run_sfm(cfg.frames_dir(), cfg.colmap_dir(), cfg.colmap_bin,
-                        cfg.camera_model, cfg.seq_overlap, cfg.use_gpu, matcher)
+                        cfg.camera_model, cfg.seq_overlap, cfg.use_gpu, matcher,
+                        capture=cap, frame_of_image=fmap)
     if stop < 2:
         return _done(t0)
 

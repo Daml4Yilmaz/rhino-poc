@@ -26,7 +26,8 @@ Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
 
 **Telefon**
 - [ ] Arka ana kamera, **zoom tam 1.0×** ve hiç dokunulmadan (lens değişimi odak uzaklığını değiştirir, tek-kamera varsayımını sessizce bozar)
-- [ ] Kayıttan **önce AE/AF kilidi** (basılı tut). Kilitsiz çekim geçersizdir — otofokus odak uzaklığını kaydırır ve COLMAP'in tek-kamera varsayımını bozar. `arkit.py` bunu `odometry.csv`'deki kare-başına `fx` değerinden tespit edip uyarır (ilk test kaydında %3.3 kayma vardı).
+- [ ] **Otofokus:** Stray Scanner AF kilidi sunmuyor — gerek de yok. ARKit her karenin `fx, fy, cx, cy` değerini `odometry.csv`'ye yazar; `sfm.py` bunları doğrudan COLMAP veritabanına yazıp bundle adjustment'ın odak uzaklığını değiştirmesini engeller. Bu **kilitten daha iyidir**: kilit sabitliği varsayar, bu ise ölçülmüş gerçek değeri kullanır. Test kaydında odak %3.3 oynamıştı ve model bunu sorunsuz taşıdı.
+- [ ] Yine de AF avlanmasını azalt: mesafeyi sabit tut (AF derinlik değişince arar), kaydı yüz zaten çerçevedeyken başlat ve 2 sn bekle, yüksek kontrastlı fon geçişlerinde süpürme.
 - [ ] Kayıt uygulaması: **Stray Scanner** veya Record3D. **iPhone'un kendi Kamera uygulaması yetmez** — o yalnızca pikselleri kaydeder, ARKit kamera pozunu ve LiDAR derinliğini dosyaya yazmaz. Ölçek videonun içinde değil, çekim anındaki hareket takibindedir; kayıt bittikten sonra geri gelmez. Stok Kamera 4K (8.3 MP) ile daha iyi doku verir ama **milimetre vermez** → yalnızca açılar ve Goode oranı hesaplanabilir, G1 karşılanamaz.
   - Stray Scanner LiDAR'lı cihaz ister (iPhone 12 Pro ve sonrası; 14 Pro Max uygun). LiDAR yoksa Record3D yalnız ARKit poziyle çalışır, `s_depth` çapraz kontrolü devre dışı kalır.
   - 1920×1440 yeterli mi? 65 cm'den yüz kısa kenarın ~%60'ını kaplar → **~4 piksel/mm**. 2 mm hedefi için fazlasıyla yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).

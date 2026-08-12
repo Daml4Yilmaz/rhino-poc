@@ -36,6 +36,12 @@ from .arkit import ArkitCapture, load_capture
 RNG = np.random.default_rng(0)
 
 
+def _cam_from_world(img):
+    """pycolmap surum farki: 3.x'te ozellik, 4.x'te metot."""
+    cfw = img.cam_from_world
+    return cfw() if callable(cfw) else cfw
+
+
 def _umeyama(src: np.ndarray, dst: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
     """dst ~ s*R@src + t  (Umeyama 1991). src,dst: (N,3)."""
     mu_s, mu_d = src.mean(0), dst.mean(0)
@@ -75,7 +81,7 @@ def scale_from_poses(rec: pycolmap.Reconstruction, cap: ArkitCapture,
         fi = fmap.get(img.name)
         if fi is None or fi >= cap.n_frames:
             continue
-        C_col.append(img.cam_from_world.inverse().translation)
+        C_col.append(_cam_from_world(img).inverse().translation)
         C_ark.append(cap.centers[fi])
     if len(C_col) < 30:
         raise RuntimeError(
@@ -148,7 +154,7 @@ def scale_from_depth(rec: pycolmap.Reconstruction, cap: ArkitCapture,
                 if m is not None:
                     mask = cv2.resize(m, (dw, dh), interpolation=cv2.INTER_NEAREST) > 127
 
-        cfw = img.cam_from_world
+        cfw = _cam_from_world(img)
         uv, dcol = [], []
         for p2 in img.points2D:
             if not p2.has_point3D():

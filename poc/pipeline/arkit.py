@@ -42,12 +42,16 @@ class ArkitCapture:
     """Normalize edilmis yakalama. Kare indeksleri rgb videosuyla 1:1."""
     centers: np.ndarray          # (N,3) metre, dunya cercevesinde kamera merkezi
     quats: np.ndarray            # (N,4) xyzw, dunya<-kamera
-    K: np.ndarray                # (3,3) RGB cozunurlugunde
+    K: np.ndarray                # (3,3) ortalama, RGB cozunurlugunde
     rgb_wh: tuple[int, int]      # (W,H)
     rgb_path: Path
     depth_dir: Path | None       # None -> LiDAR yok
     conf_dir: Path | None
     source: str                  # "stray" | "record3d"
+    # (N,4) fx,fy,cx,cy — kare basina. Otofokus kilitlenemedigi zaman
+    # kritik: COLMAP'e tek bir odak uzakligi tahmin ettirmek yerine her
+    # karenin OLCULMUS degerini veriyoruz (bkz. sfm.write_arkit_intrinsics).
+    intrinsics: np.ndarray | None = None
 
     @property
     def n_frames(self) -> int:
@@ -118,18 +122,18 @@ def load_stray(root: Path) -> ArkitCapture:
     # daha guvenilirdir. Ayrica fx'in kare boyunca SABIT olup olmadigini
     # gorebiliriz — oynuyorsa otofokus kilitli degildir ve COLMAP'in tek-kamera
     # varsayimi bozulur.
+    P = None
     if intr:
         P = np.asarray(intr, dtype=np.float64)
         fx, fy, cx, cy = P.mean(axis=0)
         drift = float((P[:, 0].max() - P[:, 0].min()) / P[:, 0].mean() * 100.0)
         K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
         if drift > 1.0:
-            print(f"[arkit] UYARI: odak uzakligi cekim boyunca %{drift:.1f} "
-                  "oynamis — AF kilitli degilmis. COLMAP'in tek-kamera "
-                  "varsayimi zayiflar, olcumlerde sapma yapar.")
+            print(f"[arkit] Odak uzakligi cekim boyunca %{drift:.1f} oynamis "
+                  "(AF kilitli degil) — kare basina olculmus ic parametreler "
+                  "COLMAP'e verilecek, tek-kamera varsayimi kullanilmayacak.")
     else:
         K = np.loadtxt(kmat, delimiter=",").reshape(3, 3)
-        drift = 0.0
 
     depth_dir = root / "depth" if (root / "depth").is_dir() else None
     conf_dir = root / "confidence" if (root / "confidence").is_dir() else None
@@ -141,7 +145,8 @@ def load_stray(root: Path) -> ArkitCapture:
 
     return ArkitCapture(centers=a[:, 0:3], quats=a[:, 3:7], K=K,
                         rgb_wh=_rgb_size(rgb), rgb_path=rgb,
-                        depth_dir=depth_dir, conf_dir=conf_dir, source="stray")
+                        depth_dir=depth_dir, conf_dir=conf_dir, source="stray",
+                        intrinsics=P)
 
 
 def load_record3d(path: Path) -> ArkitCapture:
