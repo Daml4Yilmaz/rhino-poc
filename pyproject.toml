@@ -10,7 +10,10 @@ requires-python = ">=3.10"
 dependencies = [
     "typer>=0.9",
     "numpy",
-    "opencv-contrib-python",   # ArUco icin contrib sart
+    # ArUco birakildigi icin contrib GEREKMIYOR. Colab'da hazir gelen
+    # opencv-python-headless ile contrib yan yana kurulunca cv2 namespace'i
+    # yarim yukleniyor (SIFT_create calisirken CascadeClassifier kayboluyor).
+    "opencv-python",
     "open3d",
     "trimesh",
     "pycolmap",                # COLMAP modelini okumak icin (binary ayrica kurulur)
