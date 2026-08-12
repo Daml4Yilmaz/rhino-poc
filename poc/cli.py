@@ -25,6 +25,34 @@ STEPS = ["frames", "sfm", "mvs", "scale", "export", "measure"]
 VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi"}
 
 
+def _require_exists(capture: Path) -> None:
+    """Yol yoksa komsu dosyalari listeleyerek dur.
+
+    Colab'da Drive mount'u Linux tarafinda BUYUK-KUCUK HARF DUYARLI; iPhone
+    videolari .MOV yazar, yolu .mov diye verince dosya 'yok' sayilir. Bu en
+    sik dusulen tuzak oldugu icin ayrica isaret ediyoruz.
+    """
+    if capture.exists():
+        return
+    parent = capture.parent
+    lines = [f"Yol bulunamadi: {capture}"]
+    if parent.is_dir():
+        names = sorted(p.name + ("/" if p.is_dir() else "")
+                       for p in parent.iterdir())
+        near = [n for n in names
+                if n.lower().rstrip("/") == capture.name.lower()]
+        if near:
+            lines.append(f"AMA su var: {near[0]} — sadece BUYUK/KUCUK HARF "
+                         "farki. Linux'ta bu iki ayri dosyadir.")
+        lines.append(f"{parent} icinde ({len(names)} oge):")
+        lines += [f"  {n}" for n in names[:25]]
+        if len(names) > 25:
+            lines.append(f"  ... (+{len(names) - 25})")
+    else:
+        lines.append(f"Ust klasor de yok: {parent}")
+    raise typer.BadParameter("\n".join(lines))
+
+
 @app.command()
 def process(
     capture: Path = typer.Argument(..., help="Stray Scanner klasoru, .r3d, veya duz video (TEST)"),
@@ -44,6 +72,9 @@ def process(
     stop = STEPS.index(until)
 
     # Girdi ya ARKit yakalamasi ya da (SADECE TEST icin) duz video.
+    # Once VARLIK kontrolu: yol yoksa sessizce ARKit dalina dusup "taninmayan
+    # bicim" demek yaniltici olur, asil sebep yolun yanlis olmasidir.
+    _require_exists(capture)
     test_mode = capture.is_file() and capture.suffix.lower() in VIDEO_SUFFIXES
     if test_mode:
         print("=" * 70)
