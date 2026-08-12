@@ -5,11 +5,25 @@ adim calismaz (notebook'taki kurulum notuna bak).
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import open3d as o3d
+
+
+def _auto_cache_gb() -> int:
+    """Toplam RAM'in ~%30'u, 2-8 GB araliginda.
+
+    Colab (12.7 GB) -> 3, buyuk bir makine (64 GB) -> 8. COLMAP'in 32 GB'lik
+    varsayilani neredeyse her paylasimli ortamda OOM demek.
+    """
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        return max(2, min(8, int(total / 1e9 * 0.30)))
+    except (ValueError, OSError, AttributeError):
+        return 4
 
 
 def _run(cmd: list[str], log_file: Path) -> None:
@@ -21,7 +35,8 @@ def _run(cmd: list[str], log_file: Path) -> None:
 
 def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             colmap_bin: str = "colmap", poisson_depth: int = 10,
-            poisson_trim: float = 7.0) -> Path:
+            poisson_trim: float = 7.0, cache_size_gb: int | None = None,
+            max_image_size: int | None = None) -> Path:
     """fused.ply + mesh_raw.ply uretir; mesh yolunu dondurur."""
     dense_dir.mkdir(parents=True, exist_ok=True)
     log = dense_dir.parent / "colmap.log"
@@ -51,9 +66,19 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
               "--output_path", str(dense_dir),
               "--output_type", "COLMAP"], log)
 
-    _run([colmap_bin, "patch_match_stereo",
-          "--workspace_path", str(dense_dir),
-          "--PatchMatchStereo.geom_consistency", "true"], log)
+    # cache_size VARSAYILANI 32 GB'dir; Colab'in ~12.7 GB RAM'inde surec
+    # OOM killer tarafindan SIGKILL ile oldurulur (abort degil, sessiz olum).
+    # Onbellek boyutu KALITEYI etkilemez, sadece disk trafigini artirir —
+    # mevcut bellege gore olcekle.
+    cache_gb = cache_size_gb or _auto_cache_gb()
+    cmd = [colmap_bin, "patch_match_stereo",
+           "--workspace_path", str(dense_dir),
+           "--PatchMatchStereo.geom_consistency", "true",
+           "--PatchMatchStereo.cache_size", str(cache_gb)]
+    if max_image_size:
+        cmd += ["--PatchMatchStereo.max_image_size", str(max_image_size)]
+    print(f"[mvs] patch_match basliyor (onbellek {cache_gb} GB)")
+    _run(cmd, log)
 
     fused = dense_dir / "fused.ply"
     _run([colmap_bin, "stereo_fusion",

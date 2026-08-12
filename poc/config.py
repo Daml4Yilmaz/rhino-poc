@@ -22,6 +22,10 @@ class Config:
     seq_overlap: int = 20          # video karesi -> sirali eslestirme penceresi
     use_gpu: bool = True
 
+    # MVS bellek: COLMAP varsayilani 32 GB'lik onbellek ister ve paylasimli
+    # ortamlarda (Colab ~12.7 GB) surec SIGKILL yer. None -> RAM'e gore otomatik.
+    mvs_cache_gb: int | None = None
+
     # Poisson mesh
     poisson_depth: int = 10
     poisson_trim: float = 7.0      # dusuk yogunluklu vertexleri kirp

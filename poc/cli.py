@@ -59,6 +59,7 @@ def process(
     out: Path = typer.Option(..., "--out", help="Vaka cikti klasoru"),
     n_frames: int = typer.Option(300, help="Secilecek kare sayisi"),
     max_dim: int = typer.Option(1600, help="COLMAP karesinin uzun kenari (0=kucultme)"),
+    mvs_cache_gb: int = typer.Option(0, help="MVS onbellegi GB (0=RAM'e gore otomatik)"),
     until: str = typer.Option("measure", help=f"Bu adimdan sonra dur: {STEPS}"),
     sift_gpu: bool = typer.Option(True, "--sift-gpu/--no-sift-gpu",
                                   help="COLMAP SIFT'i GPU'da kos (macOS'ta kapat)"),
@@ -121,7 +122,8 @@ def process(
     else:
         from .pipeline.mvs import run_mvs
         mesh_raw = run_mvs(cfg.frames_dir(), model, cfg.dense_dir(),
-                           cfg.colmap_bin, cfg.poisson_depth, cfg.poisson_trim)
+                           cfg.colmap_bin, cfg.poisson_depth, cfg.poisson_trim,
+                           cache_size_gb=mvs_cache_gb or None)
     if stop < 3:
         return _done(t0)
 
