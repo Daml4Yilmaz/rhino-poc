@@ -95,19 +95,49 @@ def load_stray(root: Path) -> ArkitCapture:
                 f"Stray Scanner disa aktariminda {p.name} yok: {root}\n"
                 "Uygulamadan 'Export' ile TUM klasoru aktardigindan emin ol.")
 
-    rows = []
+    rows, intr = [], []
     with open(odo) as f:
-        for r in csv.DictReader(f):
+        rd = csv.DictReader(f)
+        if not rd.fieldnames:
+            raise RuntimeError(f"odometry.csv basligi okunamadi: {odo}")
+        # Stray Scanner basligi virgulden SONRA bosluk birakir
+        # ("timestamp, frame, x, ..."), yani ham anahtarlar " x" olur.
+        rd.fieldnames = [c.strip() for c in rd.fieldnames]
+        for r in rd:
             rows.append([float(r["x"]), float(r["y"]), float(r["z"]),
                          float(r["qx"]), float(r["qy"]), float(r["qz"]),
                          float(r["qw"])])
+            if r.get("fx"):
+                intr.append([float(r["fx"]), float(r["fy"]),
+                             float(r["cx"]), float(r["cy"])])
     if not rows:
         raise RuntimeError(f"odometry.csv bos: {odo}")
     a = np.asarray(rows, dtype=np.float64)
 
-    K = np.loadtxt(kmat, delimiter=",").reshape(3, 3)
+    # Ic parametreler: odometry.csv kare basina verir ve bu camera_matrix.csv'den
+    # daha guvenilirdir. Ayrica fx'in kare boyunca SABIT olup olmadigini
+    # gorebiliriz — oynuyorsa otofokus kilitli degildir ve COLMAP'in tek-kamera
+    # varsayimi bozulur.
+    if intr:
+        P = np.asarray(intr, dtype=np.float64)
+        fx, fy, cx, cy = P.mean(axis=0)
+        drift = float((P[:, 0].max() - P[:, 0].min()) / P[:, 0].mean() * 100.0)
+        K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+        if drift > 1.0:
+            print(f"[arkit] UYARI: odak uzakligi cekim boyunca %{drift:.1f} "
+                  "oynamis — AF kilitli degilmis. COLMAP'in tek-kamera "
+                  "varsayimi zayiflar, olcumlerde sapma yapar.")
+    else:
+        K = np.loadtxt(kmat, delimiter=",").reshape(3, 3)
+        drift = 0.0
+
     depth_dir = root / "depth" if (root / "depth").is_dir() else None
     conf_dir = root / "confidence" if (root / "confidence").is_dir() else None
+    if depth_dir is not None:
+        n_depth = len(list(depth_dir.glob("*.png")))
+        if n_depth < len(a) * 0.5:
+            print(f"[arkit] UYARI: {len(a)} poz var ama sadece {n_depth} "
+                  "derinlik karesi — LiDAR capraz kontrolu zayif olacak.")
 
     return ArkitCapture(centers=a[:, 0:3], quats=a[:, 3:7], K=K,
                         rgb_wh=_rgb_size(rgb), rgb_path=rgb,
@@ -160,32 +190,67 @@ def load_capture(path: Path) -> ArkitCapture:
     return cap
 
 
-def validate(cap: ArkitCapture) -> None:
-    """Yakalamayi ise baslamadan ele: sessiz hatalar burada yakalanir."""
-    if cap.n_frames < 300:
-        raise RuntimeError(
-            f"Sadece {cap.n_frames} kare poz var (<300). 30 fps'te bu ~10 sn "
-            "eder — iki gecis icin cok kisa. Cekimi tekrarla.")
+def _view_dirs(quats: np.ndarray) -> np.ndarray:
+    """Kare basina bakis yonu (ARKit kamera ekseninde -Z ileri)."""
+    x, y, z, w = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+    n = x * x + y * y + z * z + w * w
+    s = 2.0 / np.where(n < 1e-12, 1.0, n)
+    # Donme matrisinin 3. sutunu; ileri yon onun negatifi.
+    f = np.stack([-(s * (x * z + y * w)),
+                  -(s * (y * z - x * w)),
+                  -(1 - s * (x * x + y * y))], axis=1)
+    return f / np.linalg.norm(f, axis=1, keepdims=True)
 
-    # VIO sicramasi: ardisik kareler arasi mesafe 30 fps'te ~1-3 cm olmali.
+
+def angular_coverage_deg(cap: ArkitCapture) -> float:
+    """Bakis yonlerinin tarandigi en genis aci. SfM icin ASIL olcut budur."""
+    f = _view_dirs(cap.quats)
+    G = np.clip(f @ f.T, -1.0, 1.0)
+    return float(np.degrees(np.arccos(G)).max())
+
+
+def validate(cap: ArkitCapture) -> None:
+    """Yakalamayi ise baslamadan ele.
+
+    Ayrim onemli: cozulemez olan seyler HATA, protokolun altinda kalan
+    seyler UYARI. Yol uzunlugu tek basina olcut degil — bir yuzun etrafinda
+    72 derecelik kisa bir yay, iki metrelik duz bir kaydirmadan cok daha
+    fazla bilgi tasir. Belirleyici olan ACISAL KAPSAMA.
+    """
+    n = cap.n_frames
+    if n < 120:
+        raise RuntimeError(
+            f"Sadece {n} kare poz var (<120). Cekim cok kisa, tekrarla.")
+
     step = np.linalg.norm(np.diff(cap.centers, axis=0), axis=1)
     jumps = int((step > 0.15).sum())
-    if jumps > cap.n_frames * 0.02:
+    if jumps > n * 0.02:
         raise RuntimeError(
             f"{jumps} karede ani poz sicramasi (>15 cm) — ARKit takibi kopmus. "
             "Dokulu ve sabit bir arka plan onunde tekrar cek.")
 
-    # Yol uzunlugu: kulaktan kulaga iki gecis en az ~1.5 m yol demek. Kisa
-    # yol = zayif paralaks = Umeyama olcegi kotu kosullu.
     path_m = float(step.sum())
-    if path_m < 1.0:
-        raise RuntimeError(
-            f"Kamera toplam {path_m:.2f} m yol almis (<1.0 m). Iki kisilik "
-            "protokolde beklenen >1.5 m — filmci yeterince genis yay cizmemis.")
+    cover = angular_coverage_deg(cap)
 
-    print(f"[arkit] {cap.source}: {cap.n_frames} kare, yol {path_m:.2f} m, "
-          f"RGB {cap.rgb_wh[0]}x{cap.rgb_wh[1]}, "
+    # HATA: paralaks yoksa problem matematiksel olarak cozumsuz.
+    if cover < 20.0:
+        raise RuntimeError(
+            f"Bakis acisi cekim boyunca sadece {cover:.0f} derece degismis "
+            f"(yol {path_m:.2f} m). Kamera denegin ETRAFINDA donmemis — "
+            "paralaks yok, SfM bunu cozemez. Telefonu cevirmek yetmez, "
+            "konumu degismeli.")
+
+    print(f"[arkit] {cap.source}: {n} kare, acisal kapsama {cover:.0f} derece, "
+          f"yol {path_m:.2f} m, RGB {cap.rgb_wh[0]}x{cap.rgb_wh[1]}, "
           f"LiDAR {'var' if cap.has_depth else 'YOK'}")
+
+    # UYARI: kosar ama protokolun altinda; sonuc G1 kalitesinde olmaz.
+    if cover < 120.0:
+        print(f"[arkit] UYARI: {cover:.0f} derece kapsama — protokol kulaktan "
+              "kulaga ~180 derece ister. Yuzun yan bolgeleri eksik kalacak.")
+    if n < 700:
+        print(f"[arkit] UYARI: {n} kare (~{n/30:.0f} sn) — protokol iki gecis "
+              "icin ~40-60 sn ister. Burun tabani gecisi yapilmamis olabilir.")
     if not cap.has_depth:
         print("[arkit] UYARI: derinlik yok — olcek capraz kontrolu (s_depth) "
               "yapilamayacak, sadece poz tabanli olcek kalir.")

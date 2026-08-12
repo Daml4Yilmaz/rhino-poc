@@ -42,6 +42,10 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
 
     # Poisson: Open3D ile (yogunluk dusuk vertexleri kirparak)
     pcd = o3d.io.read_point_cloud(str(fused))
+    # fused.ply karelerden okunan RGB'yi tasir; Poisson bunu mesh'e aktarir.
+    # Renk buradan kaybolursa GLB gri cikar — erken haber ver.
+    if not pcd.has_colors():
+        print("[mvs] UYARI: fused.ply renk tasimiyor — mesh renksiz olacak.")
     if not pcd.has_normals():
         pcd.estimate_normals()
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
@@ -54,5 +58,6 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
 
     out = dense_dir.parent.parent / "mesh_raw.ply"
     o3d.io.write_triangle_mesh(str(out), mesh)
-    print(f"[mvs] mesh: {len(mesh.vertices)} vertex -> {out}")
+    print(f"[mvs] mesh: {len(mesh.vertices)} vertex, "
+          f"renk {'var' if mesh.has_vertex_colors() else 'YOK'} -> {out}")
     return out
