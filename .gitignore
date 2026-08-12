@@ -16,3 +16,8 @@ vaka_*/
 
 # Devir raporu: butce ve ticari detay iceriyor, repo PUBLIC
 HANDOVER_claude_code.md
+
+# Build ciktilari — pip install uretir, kaynak degil
+*.egg-info/
+build/
+dist/
