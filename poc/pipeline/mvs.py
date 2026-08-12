@@ -80,10 +80,16 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     print(f"[mvs] patch_match basliyor (onbellek {cache_gb} GB)")
     _run(cmd, log)
 
+    # stereo_fusion da ayni tuzagi tasir, hatta daha kotusu: use_cache
+    # VARSAYILANI 0'dir, yani butun derinlik/normal haritalarini bellege
+    # yukler. Acinca sinirli bir LRU onbellege gecer — 300 goruntude fark
+    # OOM ile tamamlanmis fuzyon arasindaki fark oluyor.
     fused = dense_dir / "fused.ply"
     _run([colmap_bin, "stereo_fusion",
           "--workspace_path", str(dense_dir),
-          "--output_path", str(fused)], log)
+          "--output_path", str(fused),
+          "--StereoFusion.use_cache", "1",
+          "--StereoFusion.cache_size", str(cache_gb)], log)
 
     # Poisson: Open3D ile (yogunluk dusuk vertexleri kirparak)
     pcd = o3d.io.read_point_cloud(str(fused))
