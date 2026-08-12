@@ -26,7 +26,7 @@ Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
 
 **Telefon**
 - [ ] Arka ana kamera, **zoom tam 1.0×** ve hiç dokunulmadan (lens değişimi odak uzaklığını değiştirir, tek-kamera varsayımını sessizce bozar)
-- [ ] Kayıttan **önce AE/AF kilidi** (basılı tut). Kilitsiz çekim geçersizdir.
+- [ ] Kayıttan **önce AE/AF kilidi** (basılı tut). Kilitsiz çekim geçersizdir — otofokus odak uzaklığını kaydırır ve COLMAP'in tek-kamera varsayımını bozar. `arkit.py` bunu `odometry.csv`'deki kare-başına `fx` değerinden tespit edip uyarır (ilk test kaydında %3.3 kayma vardı).
 - [ ] Kayıt uygulaması: **Stray Scanner** veya Record3D. **iPhone'un kendi Kamera uygulaması yetmez** — o yalnızca pikselleri kaydeder, ARKit kamera pozunu ve LiDAR derinliğini dosyaya yazmaz. Ölçek videonun içinde değil, çekim anındaki hareket takibindedir; kayıt bittikten sonra geri gelmez. Stok Kamera 4K (8.3 MP) ile daha iyi doku verir ama **milimetre vermez** → yalnızca açılar ve Goode oranı hesaplanabilir, G1 karşılanamaz.
   - Stray Scanner LiDAR'lı cihaz ister (iPhone 12 Pro ve sonrası; 14 Pro Max uygun). LiDAR yoksa Record3D yalnız ARKit poziyle çalışır, `s_depth` çapraz kontrolü devre dışı kalır.
   - 1920×1440 yeterli mi? 65 cm'den yüz kısa kenarın ~%60'ını kaplar → **~4 piksel/mm**. 2 mm hedefi için fazlasıyla yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
@@ -54,10 +54,12 @@ uv venv && uv pip install -e .
 poc process vaka_001_stray/ --out vaka_001 --no-sift-gpu --until sfm
 ```
 
+Not: macOS'ta COLMAP CUDA'sız derlenir — beklenen. `mvs` adımı yerelde koşmaz, `--until sfm` ile durdur.
+
 **Colab (sadece GPU gereken adımlar: `mvs`, ileride `gsplat`)**
-1. Vaka klasörünü Drive'a yükle, `colab_setup.ipynb`'yi GPU runtime ile aç.
-2. `poc process ... --until mvs --resume` → `mesh_raw.ply`.
-3. Sonucu yerele indirip kalan adımları burada koş.
+1. Colab'da `File > Open notebook > GitHub` → `Daml4Yilmaz/rhino-poc` → `colab_setup.ipynb`. Notebook kodu repodan çeker; Drive'a repo yüklemek gerekmez, Drive yalnızca veri ve çıktı için.
+2. Hücreleri sırayla koş. Hesaplama `/content`'te yapılır (Drive FUSE üzerinde COLMAP MVS on binlerce küçük dosya yazdığı için çok yavaştır); sonuçlar son hücrede `MyDrive/rhino-poc-out/<vaka>/` altına kopyalanır.
+3. Colab'da OpenCV **kurma** — hazır geleni kullan. Üstüne `opencv-contrib-python` kurulunca `cv2` yarım yükleniyor (`SIFT_create` çalışır, `CascadeClassifier` kaybolur). ArUco bırakıldığı için contrib gereksiz.
 
 Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. Geri kalan her şey M4 Pro'da koşar; Colab'ın ücretsiz kotası bir kez oturum ortasında tükendiği için Colab'a tek adım devredilir. Ayrıntı: `PLAN.md` §4.
 
@@ -74,8 +76,27 @@ Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. G
 | (e) Markersiz ölçek (ARKit poz + LiDAR) | `pipeline/scale.py` | hazır |
 | (f) FLAME kaydı → landmarks.json | `pipeline/flame_fit.py` | stub (FLAME hesabını aç: flame.is.tue.mpg.de) |
 | (g) 6 ölçüm | `pipeline/measure.py` | hazır (landmarks.json bekler) |
-| (h) GLB export | `pipeline/export.py` | hazır (doku sonra) |
+| (h) Renkli GLB export | `pipeline/export.py` | hazır (vertex rengi; UV doku sonra) |
 | Hata raporu | `report/compare.py` | hazır |
+
+Renk bedava gelir: COLMAP `stereo_fusion` her noktaya karelerden okunan RGB'yi yazar, Poisson mesh'e taşır, `export.py` GLB'ye aktarır. Bu **vertex rengi**, UV dokusu değil — çözünürlüğü mesh yoğunluğuyla sınırlı. Ben/kırışıklık gibi ince detay için karelerden doku pişirmek gerekir (WP7); ölçümleri etkilemez.
+
+## Kalite kapıları — kodun reddettiği durumlar
+
+Boşa geçen 40 dakikalık koşuları önlemek için pipeline erken durur:
+
+| Kontrol | Nerede | Eşik |
+|---|---|---|
+| Açısal kapsama | `arkit.py` | <20° → **hata** (paralaks yok, SfM çözemez); <120° → uyarı |
+| VIO sıçraması | `arkit.py` | karelerin %2'sinden fazlasında >15 cm → hata |
+| Odak uzaklığı kayması | `arkit.py` | >%1 → uyarı (**AE/AF kilitlenmemiş**) |
+| Kare sayısı | `arkit.py` | <120 → hata; <700 → uyarı |
+| SfM kayıt oranı | `sfm.py` | <%50 veya <20 kare → **hata**, MVS'e geçilmez |
+| Ölçek uyumu | `scale.py` | `agreement_pct` >%1.5 → `scale_verified=false` |
+
+Yol uzunluğu bilerek ölçüt **değil**: bir yüzün etrafında 72°'lik kısa bir yay, iki metrelik düz kaydırmadan çok daha fazla bilgi taşır. Belirleyici olan açısal kapsama.
+
+COLMAP birden fazla alt-model üretirse (`sparse/0`, `sparse/1`, …) `sfm.py` **en çok kare kaydedileni** seçer ve bölünmeyi bildirir.
 
 ## Ölçek doğrulaması
 
@@ -92,16 +113,35 @@ Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. G
 ```bash
 poc process vaka_001_stray/ --out vaka_001
 poc process vaka_001_stray/ --out vaka_001 --until sfm      # erken dur
+poc process vaka_001_stray/ --out vaka_001 --resume         # kesintiden devam
 poc scale   vaka_001_stray/ --out vaka_001                  # sadece ölçek
 poc measure vaka_001/landmarks.json --out vaka_001/measurements.json
 python -m poc.report.compare calipers.csv vaka_001 vaka_002
 ```
 
+Colab'da `poc` yerine **`python -m poc.cli`** kullan — kurulan komut betiği her zaman PATH'e girmiyor.
+
 Kumpas değerleri: `data/calipers_template.csv`'yi kopyala, doldur.
+
+### Test modu — düz video (ARKit verisi olmadan)
+
+`poc process` argümanı `.mp4/.mov` ise ölçek adımı atlanır ve yalnızca fotogrametri hattı koşar:
+
+```bash
+poc process test.mov --out test_out --n-frames 150
+```
+
+Çıktı `model_unitless.glb` adıyla yazılır ve koşu başında birimsiz olduğunu bildiren bir uyarı basar. **Yalnızca hattın ayakta olduğunu doğrular** — açı ve Goode oranı anlamlı, mm cinsinden uzunluk/genişlik/sapma üretilemez. G1 için `Stray Scanner` kaydı şart.
+
+### Çekim uygunluk teşhisi
+
+`colab_setup.ipynb` **bölüm 6**: videoyu pipeline'a sokmadan ~2 dakikada ölçer ve `UYGUN` / `RET` der. Ölçtüğü üç şey: kare başına SIFT özelliği (>1500 iyi), ardışık kareler arası iç-eşleşme (>50 iyi), ve **kayma hızı px/sn** (>60 iyi, <25 paralaks yok).
+
+Kayma hızı zamana normalize edilir; ham piksel kayması kare aralığına bağlı olduğu için aynı sahne 37 fps ardışık ile 60 fps'te 34 kare atlayarak ölçüldüğünde 20 kat farklı okunur.
 
 ## İlk başarı kontrolü
 
-1. `arkit` çıktısı: >300 kare, yol >1.5 m, LiDAR "var".
-2. `sfm` ≥200 kare kaydediyor.
+1. `arkit` çıktısı: açısal kapsama >120°, sıçrama yok, LiDAR "var", odak kayması uyarısı **yok**.
+2. `sfm` karelerin >%50'sini kaydediyor, tek parça (alt-model bölünmesi uyarısı yok).
 3. `scale.json` → `agreement_pct` < 1.5 ve `scale_verified: true`.
-4. `model.glb` bbox ~200–250 mm; aynı denek 3 kez çekildiğinde ölçek %1 içinde tekrar ediyor.
+4. `model.glb` renkli, bbox ~200–250 mm; aynı denek 3 kez çekildiğinde ölçek %1 içinde tekrar ediyor.
