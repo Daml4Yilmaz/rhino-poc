@@ -6,6 +6,7 @@ adim calismaz (notebook'taki kurulum notuna bak).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,7 +37,8 @@ def _run(cmd: list[str], log_file: Path) -> None:
 def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             colmap_bin: str = "colmap", poisson_depth: int = 10,
             poisson_trim: float = 7.0, cache_size_gb: int | None = None,
-            max_image_size: int | None = None) -> Path:
+            max_image_size: int | None = None,
+            src_images: int | None = None) -> Path:
     """fused.ply + mesh_raw.ply uretir; mesh yolunu dondurur."""
     dense_dir.mkdir(parents=True, exist_ok=True)
     log = dense_dir.parent / "colmap.log"
@@ -65,6 +67,21 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
               "--input_path", str(sparse_model),
               "--output_path", str(dense_dir),
               "--output_type", "COLMAP"], log)
+
+    # Komsu (source) goruntu sayisi: image_undistorter patch-match.cfg'ye
+    # "__auto__, 20" yazar, yani her referans 20 komsuyla eslesir. Maliyet ve
+    # ONBELLEK BASKISI bununla dogru orantili: 300 goruntunun derinlik+normal
+    # haritalari ~9 GB tutar, onbellek daha kucukse surekli tahliye-yeniden
+    # okuma dongusune girilir ve is 3-4 kat yavaslar. Yuz gibi kucuk ve yogun
+    # ortusmeli bir sahnede 20 komsu fazladir.
+    if src_images:
+        cfg = dense_dir / "stereo" / "patch-match.cfg"
+        if cfg.exists():
+            txt = cfg.read_text()
+            new = re.sub(r"__auto__,\s*\d+", f"__auto__, {src_images}", txt)
+            if new != txt:
+                cfg.write_text(new)
+                print(f"[mvs] komsu goruntu sayisi -> {src_images}")
 
     # cache_size VARSAYILANI 32 GB'dir; Colab'in ~12.7 GB RAM'inde surec
     # OOM killer tarafindan SIGKILL ile oldurulur (abort degil, sessiz olum).
