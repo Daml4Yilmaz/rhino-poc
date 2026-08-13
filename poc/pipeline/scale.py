@@ -1,27 +1,5 @@
-"""Adim (e): markersiz mutlak olcek.
+"""Estimate metric scale from ARKit trajectory and LiDAR depth."""
 
-Fotogrametri (COLMAP) birimsiz bir model verir — sekil dogru, boyut yok.
-Marker kullanmadigimiz icin "1 COLMAP birimi kac mm" carpani telefonun
-metrik ARKit takibinden gelir. Model hala tamamen fotogrametriyle uretilir;
-burada uretilen tek sey bir sayidir.
-
-Iki BAGIMSIZ tahmin uretilir ve birbirine karsi kontrol edilir:
-
-  s_pose   Kamera yorungeleri. COLMAP kamera merkezleri ile ARKit kamera
-           merkezleri arasindaki benzerlik donusumunun olcegi. Iki kisilik
-           protokolde kamera >1.5 m yol aldigi icin bu iyi kosullu.
-  s_depth  LiDAR derinligi. Seyrek COLMAP noktalarinin kare icindeki
-           derinligi ile ayni pikseldeki LiDAR derinliginin orani. Tek bir
-           LiDAR okumasi +-1 cm gurultuludur ama 10^5 esleşmede rastgele
-           bilesen sonumlenir; kalan sistematik sapma zaten ikinci bir
-           tahminciyle yakalamak istedigimiz sey.
-
-Ikisi %1.5'ten fazla ayrisirsa vaka `scale_verified=false` isaretlenir.
-Marker'in `side_spread_pct` kontrolunun yerini bu tutar.
-
-NOT: s_pose olcegi sadece kamera MERKEZLERINDEN cikar; ARKit (OpenGL, -Z
-ileri) ile COLMAP (OpenCV, +Z ileri) eksen farki bu yuzden onemsizdir.
-"""
 from __future__ import annotations
 
 import json
@@ -29,228 +7,231 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import pycolmap
 
-from .arkit import ArkitCapture, load_capture
+from poc.logging_utils import get_logger
 
-RNG = np.random.default_rng(0)
+from .arkit import ArkitCapture
 
-
-def _cam_from_world(img):
-    """pycolmap surum farki: 3.x'te ozellik, 4.x'te metot."""
-    cfw = img.cam_from_world
-    return cfw() if callable(cfw) else cfw
+RANDOM_GENERATOR = np.random.default_rng(20260813)
 
 
-def _umeyama(src: np.ndarray, dst: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
-    """dst ~ s*R@src + t  (Umeyama 1991). src,dst: (N,3)."""
-    mu_s, mu_d = src.mean(0), dst.mean(0)
-    S, D = src - mu_s, dst - mu_d
-    cov = (D.T @ S) / len(src)
-    U, d, Vt = np.linalg.svd(cov)
-    W = np.eye(3)
-    if np.linalg.det(U) * np.linalg.det(Vt) < 0:
-        W[2, 2] = -1.0
-    R = U @ W @ Vt
-    var_s = (S ** 2).sum() / len(src)
-    s = float(np.trace(np.diag(d) @ W) / var_s)
-    t = mu_d - s * R @ mu_s
-    return s, R, t
+def _camera_from_world(image):
+    transform = image.cam_from_world
+    return transform() if callable(transform) else transform
 
 
-def _frame_map(case_dir: Path) -> dict[str, int]:
-    """COLMAP goruntu adi -> ARKit kare indeksi (frames.py yazar)."""
-    p = case_dir / "frames_index.json"
-    if not p.exists():
-        raise FileNotFoundError(
-            f"{p} yok. Olcek, her karenin hangi ARKit karesi oldugunu bilmek "
-            "zorunda — 'frames' adimini bu surumle tekrar kos.")
-    return json.loads(p.read_text())["frame_of_image"]
+def umeyama_similarity(
+    source: np.ndarray, target: np.ndarray
+) -> tuple[float, np.ndarray, np.ndarray]:
+    """Solve ``target ~= scale * rotation @ source + translation``."""
+    source_mean = source.mean(axis=0)
+    target_mean = target.mean(axis=0)
+    centered_source = source - source_mean
+    centered_target = target - target_mean
+    covariance = centered_target.T @ centered_source / len(source)
+    left, singular_values, right_transposed = np.linalg.svd(covariance)
+    reflection = np.eye(3)
+    if np.linalg.det(left) * np.linalg.det(right_transposed) < 0:
+        reflection[2, 2] = -1.0
+    rotation = left @ reflection @ right_transposed
+    variance = np.sum(centered_source**2) / len(source)
+    scale = float(np.trace(np.diag(singular_values) @ reflection) / variance)
+    translation = target_mean - scale * rotation @ source_mean
+    return scale, rotation, translation
 
 
-def scale_from_poses(rec: pycolmap.Reconstruction, cap: ArkitCapture,
-                     fmap: dict[str, int], n_pairs: int = 20000) -> dict:
-    """Yorunge tabanli olcek (metre / COLMAP birimi).
-
-    Olcegi ikili mesafe oranlarinin MEDYANINDAN alir: bu, VIO'nun donme
-    kaymasindan ve tek tuk relokalizasyon sicramasindan etkilenmez. Sonra
-    ayni ic noktalarla tam Umeyama kosup artigi raporlar.
-    """
-    C_col, C_ark = [], []
-    for img in rec.images.values():
-        fi = fmap.get(img.name)
-        if fi is None or fi >= cap.n_frames:
+def _ransac_similarity(
+    source: np.ndarray,
+    target: np.ndarray,
+    *,
+    iterations: int = 1000,
+    threshold_m: float = 0.025,
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+    if len(source) < 6:
+        raise ValueError("At least six trajectory correspondences are required")
+    best_inliers = np.zeros(len(source), dtype=bool)
+    best_median = float("inf")
+    sample_size = min(8, len(source))
+    for _ in range(iterations):
+        sample = RANDOM_GENERATOR.choice(len(source), size=sample_size, replace=False)
+        try:
+            scale, rotation, translation = umeyama_similarity(source[sample], target[sample])
+        except np.linalg.LinAlgError:
             continue
-        C_col.append(_cam_from_world(img).inverse().translation)
-        C_ark.append(cap.centers[fi])
-    if len(C_col) < 30:
+        predicted = scale * (source @ rotation.T) + translation
+        residuals = np.linalg.norm(target - predicted, axis=1)
+        inliers = residuals <= threshold_m
+        median = float(np.median(residuals[inliers])) if np.any(inliers) else float("inf")
+        if inliers.sum() > best_inliers.sum() or (
+            inliers.sum() == best_inliers.sum() and median < best_median
+        ):
+            best_inliers = inliers
+            best_median = median
+    if best_inliers.sum() < max(20, round(len(source) * 0.50)):
         raise RuntimeError(
-            f"Sadece {len(C_col)} karede hem COLMAP pozu hem ARKit pozu var "
-            "(<30). SfM cok az kare kaydetmis ya da kare eslesmesi bozuk.")
-    C_col = np.asarray(C_col, np.float64)
-    C_ark = np.asarray(C_ark, np.float64)
+            f"Trajectory scale alignment found only {best_inliers.sum()}/{len(source)} inliers"
+        )
+    scale, rotation, translation = umeyama_similarity(source[best_inliers], target[best_inliers])
+    return scale, rotation, translation, best_inliers
 
-    n = len(C_col)
-    i = RNG.integers(0, n, n_pairs)
-    j = RNG.integers(0, n, n_pairs)
-    d_col = np.linalg.norm(C_col[i] - C_col[j], axis=1)
-    d_ark = np.linalg.norm(C_ark[i] - C_ark[j], axis=1)
 
-    # Kisa taban cizgileri oranı patlatir: yorunge capinin %10'undan kisa
-    # ciftleri at.
-    span = float(np.linalg.norm(C_col.max(0) - C_col.min(0)))
-    ok = d_col > 0.10 * span
-    if ok.sum() < 100:
-        raise RuntimeError("Yeterli uzun taban cizgisi yok — kamera neredeyse "
-                           "sabit kalmis, olcek bu veriden cikarilamaz.")
-    ratios = d_ark[ok] / d_col[ok]
-    s = float(np.median(ratios))
-    mad = float(np.median(np.abs(ratios - s)))
-    inlier = float((np.abs(ratios - s) / s < 0.05).mean())
-
-    _, R, t = _umeyama(C_col, C_ark)
-    resid = np.linalg.norm(C_ark - (s * (C_col @ R.T) + t), axis=1)
-
+def scale_from_poses(reconstruction, capture: ArkitCapture, image_metadata: dict) -> dict:
+    colmap_centers: list[np.ndarray] = []
+    arkit_centers: list[np.ndarray] = []
+    for image in reconstruction.images.values():
+        entry = image_metadata.get(image.name)
+        if entry is None:
+            continue
+        frame_id = int(entry["frame_id"])
+        colmap_centers.append(_camera_from_world(image).inverse().translation)
+        arkit_centers.append(capture.frame(frame_id).center_m)
+    if len(colmap_centers) < 30:
+        raise RuntimeError(f"Only {len(colmap_centers)} images have both COLMAP and ARKit poses")
+    source = np.asarray(colmap_centers, dtype=np.float64)
+    target = np.asarray(arkit_centers, dtype=np.float64)
+    scale, rotation, translation, inliers = _ransac_similarity(source, target)
+    residuals = np.linalg.norm(target - (scale * (source @ rotation.T) + translation), axis=1)
     return {
-        "s_pose_m_per_unit": s,
-        "pose_spread_pct": round(100.0 * mad / s, 3),
-        "pose_inlier_ratio": round(inlier, 4),
-        "pose_resid_median_mm": round(float(np.median(resid)) * 1000.0, 2),
-        "n_frames_paired": n,
+        "pose_scale_m_per_unit": scale,
+        "pose_inlier_count": int(inliers.sum()),
+        "pose_pair_count": len(source),
+        "pose_inlier_ratio": round(float(inliers.mean()), 4),
+        "pose_residual_median_mm": round(float(np.median(residuals[inliers])) * 1000.0, 3),
+        "pose_residual_p95_mm": round(float(np.percentile(residuals[inliers], 95)) * 1000.0, 3),
     }
 
 
-def scale_from_depth(rec: pycolmap.Reconstruction, cap: ArkitCapture,
-                     fmap: dict[str, int], mask_dir: Path | None = None,
-                     conf_min: int = 2, d_min: float = 0.25,
-                     d_max: float = 1.50) -> dict | None:
-    """LiDAR tabanli olcek (metre / COLMAP birimi). LiDAR yoksa None."""
-    if not cap.has_depth:
+def scale_from_depth(
+    reconstruction,
+    capture: ArkitCapture,
+    image_metadata: dict,
+    masks_dir: Path | None,
+    *,
+    minimum_confidence: int = 2,
+) -> dict | None:
+    if not capture.has_depth:
         return None
-
-    W_rgb, H_rgb = cap.rgb_wh
+    source_width, source_height = capture.rgb_size
     ratios: list[np.ndarray] = []
-    n_img = 0
-
-    for img in rec.images.values():
-        fi = fmap.get(img.name)
-        if fi is None:
+    used_images = 0
+    for image in reconstruction.images.values():
+        entry = image_metadata.get(image.name)
+        if entry is None:
             continue
-        dc = cap.depth_m(fi)
-        if dc is None:
+        frame_id = int(entry["frame_id"])
+        depth_record = capture.depth_m(frame_id)
+        if depth_record is None:
             continue
-        depth, conf = dc
-        dh, dw = depth.shape
-
-        cam = rec.cameras[img.camera_id]
-        # COLMAP goruntusu yeniden boyutlanmis olabilir -> LiDAR izgarasina oran
-        fx_img, fy_img = dw / float(cam.width), dh / float(cam.height)
-
+        depth, confidence = depth_record
+        depth_height, depth_width = depth.shape
+        image_to_source = np.linalg.inv(np.asarray(entry["source_to_image"], dtype=np.float64))
         mask = None
-        if mask_dir is not None:
-            mp = mask_dir / (Path(img.name).stem + ".png")
-            if mp.exists():
-                m = cv2.imread(str(mp), cv2.IMREAD_GRAYSCALE)
-                if m is not None:
-                    mask = cv2.resize(m, (dw, dh), interpolation=cv2.INTER_NEAREST) > 127
+        if masks_dir is not None:
+            mask = cv2.imread(str(masks_dir / f"{image.name}.png"), cv2.IMREAD_GRAYSCALE)
 
-        cfw = _cam_from_world(img)
-        uv, dcol = [], []
-        for p2 in img.points2D:
-            if not p2.has_point3D():
+        camera_from_world = _camera_from_world(image)
+        image_ratios: list[float] = []
+        for point in image.points2D:
+            if not point.has_point3D():
                 continue
-            X = rec.points3D[p2.point3D_id].xyz
-            z = float((cfw.rotation.matrix() @ X + cfw.translation)[2])
-            if z <= 0:
+            world_point = reconstruction.points3D[point.point3D_id].xyz
+            colmap_depth = float(
+                (camera_from_world.rotation.matrix() @ world_point + camera_from_world.translation)[
+                    2
+                ]
+            )
+            if colmap_depth <= 0:
                 continue
-            uv.append(p2.xy)
-            dcol.append(z)
-        if len(dcol) < 20:
-            continue
+            image_u, image_v = point.xy
+            if mask is not None:
+                mask_x = int(np.clip(round(image_u), 0, mask.shape[1] - 1))
+                mask_y = int(np.clip(round(image_v), 0, mask.shape[0] - 1))
+                if mask[mask_y, mask_x] < 128:
+                    continue
+            source_pixel = image_to_source @ np.asarray([image_u, image_v, 1.0])
+            source_u, source_v = source_pixel[:2] / source_pixel[2]
+            if not (0 <= source_u < source_width and 0 <= source_v < source_height):
+                continue
+            depth_x = int(np.clip(source_u / source_width * depth_width, 0, depth_width - 1))
+            depth_y = int(np.clip(source_v / source_height * depth_height, 0, depth_height - 1))
+            lidar_depth = float(depth[depth_y, depth_x])
+            if confidence[depth_y, depth_x] < minimum_confidence:
+                continue
+            if not 0.25 <= lidar_depth <= 1.5:
+                continue
+            image_ratios.append(lidar_depth / colmap_depth)
+        if len(image_ratios) >= 15:
+            ratios.append(np.asarray(image_ratios, dtype=np.float64))
+            used_images += 1
 
-        uv = np.asarray(uv, np.float64)
-        dcol = np.asarray(dcol, np.float64)
-        px = np.clip((uv[:, 0] * fx_img).astype(int), 0, dw - 1)
-        py = np.clip((uv[:, 1] * fy_img).astype(int), 0, dh - 1)
-
-        dlid = depth[py, px]
-        good = (conf[py, px] >= conf_min) & (dlid > d_min) & (dlid < d_max)
-        if mask is not None:
-            good &= mask[py, px]
-        if good.sum() < 20:
-            continue
-
-        ratios.append(dlid[good] / dcol[good])
-        n_img += 1
-
-    if n_img < 20:
-        print(f"[scale] LiDAR capraz kontrolu atlandi — sadece {n_img} karede "
-              "yeterli yuksek guvenli derinlik eslesmesi bulundu.")
+    if used_images < 15:
+        get_logger().warning(
+            "LiDAR scale check unavailable | only %d images had sufficient face correspondences",
+            used_images,
+        )
         return None
-
-    r = np.concatenate(ratios)
-    s = float(np.median(r))
-    mad = float(np.median(np.abs(r - s)))
+    values = np.concatenate(ratios)
+    median = float(np.median(values))
+    absolute_deviation = np.abs(values - median)
+    mad = float(np.median(absolute_deviation))
+    robust_values = values[absolute_deviation <= max(3.5 * mad, median * 0.01)]
+    scale = float(np.median(robust_values))
     return {
-        "s_depth_m_per_unit": s,
-        "depth_spread_pct": round(100.0 * mad / s, 3),
-        "n_depth_samples": int(r.size),
-        "n_depth_frames": n_img,
+        "depth_scale_m_per_unit": scale,
+        "depth_sample_count": len(robust_values),
+        "depth_image_count": used_images,
+        "depth_mad_percent": round(
+            float(np.median(np.abs(robust_values - scale))) / scale * 100, 3
+        ),
     }
 
 
-def compute_scale(case_dir: Path, sparse_model: Path, capture: Path,
-                  out_json: Path, mask_dir: Path | None = None,
-                  agreement_pct: float = 1.5) -> float:
-    """mm / COLMAP birimi dondurur ve scale.json yazar."""
-    rec = pycolmap.Reconstruction(str(sparse_model))
-    cap = load_capture(capture)
-    fmap = _frame_map(case_dir)
+def compute_scale(
+    sparse_model: Path,
+    capture: ArkitCapture,
+    frame_index: Path,
+    output_json: Path,
+    *,
+    masks_dir: Path | None = None,
+    maximum_disagreement_percent: float = 2.0,
+) -> float:
+    import pycolmap
 
-    pose = scale_from_poses(rec, cap, fmap)
-    depth = scale_from_depth(rec, cap, fmap, mask_dir)
-
-    s_m = pose["s_pose_m_per_unit"]
-    result: dict = dict(pose)
-    result["scale_source"] = "pose"
-
-    if depth is not None:
-        result.update(depth)
-        disagree = abs(depth["s_depth_m_per_unit"] - s_m) / s_m * 100.0
-        result["agreement_pct"] = round(disagree, 3)
-        result["scale_verified"] = bool(disagree <= agreement_pct)
-        if not result["scale_verified"]:
-            print(f"[scale] UYARI: poz ve LiDAR olcekleri %{disagree:.2f} "
-                  f"ayrisiyor (esik %{agreement_pct}). Vaka "
-                  "'scale_verified=false' — G1 tablosuna incelemeden girmesin.")
+    reconstruction = pycolmap.Reconstruction(str(sparse_model))
+    image_metadata = json.loads(frame_index.read_text(encoding="utf-8"))["images"]
+    pose_result = scale_from_poses(reconstruction, capture, image_metadata)
+    depth_result = scale_from_depth(reconstruction, capture, image_metadata, masks_dir=masks_dir)
+    pose_scale = float(pose_result["pose_scale_m_per_unit"])
+    result: dict = dict(pose_result)
+    result["scale_source"] = "arkit_trajectory"
+    if depth_result is not None:
+        result.update(depth_result)
+        disagreement = (
+            abs(float(depth_result["depth_scale_m_per_unit"]) - pose_scale) / pose_scale * 100
+        )
+        result["scale_disagreement_percent"] = round(disagreement, 3)
+        result["scale_verified"] = disagreement <= maximum_disagreement_percent
     else:
+        result["scale_disagreement_percent"] = None
         result["scale_verified"] = None
-        result["agreement_pct"] = None
-        print("[scale] LiDAR yok/yetersiz — capraz kontrol yapilamadi. "
-              "Guvence sadece tekrarlanabilirlikten (3 cekim) gelecek.")
-
-    scale_mm = s_m * 1000.0
+    scale_mm = pose_scale * 1000.0
     result["scale_mm_per_unit"] = scale_mm
-    out_json.write_text(json.dumps(result, indent=2))
-
-    print(f"[scale] {scale_mm:.6f} mm/birim  "
-          f"(poz: {pose['n_frames_paired']} kare, sapma "
-          f"%{pose['pose_spread_pct']}, ic nokta "
-          f"%{pose['pose_inlier_ratio']*100:.0f})")
-    if pose["pose_spread_pct"] > 2.0:
-        print("[scale] UYARI: yorunge olcegi %2'den fazla sapiyor — VIO takibi "
-              "zayif. Arka planin dokulu ve sabit oldugundan emin ol.")
+    output_json.parent.mkdir(parents=True, exist_ok=True)
+    output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    get_logger().info(
+        "Metric scale | %.6f mm/unit | pose inliers %d/%d | LiDAR agreement %s",
+        scale_mm,
+        pose_result["pose_inlier_count"],
+        pose_result["pose_pair_count"],
+        (
+            f"{result['scale_disagreement_percent']:.2f}%"
+            if result["scale_disagreement_percent"] is not None
+            else "unavailable"
+        ),
+    )
+    if result["scale_verified"] is False:
+        get_logger().warning(
+            "Scale verification failed: pose and LiDAR estimates differ by %.2f%%",
+            result["scale_disagreement_percent"],
+        )
     return scale_mm
-
-
-def sanity_check(mesh_mm, landmarks: dict | None = None) -> dict:
-    """Olcegi ASLA belirlemez; sadece kaba hatayi yakalar (rapora yazilir)."""
-    ext = np.asarray(mesh_mm.bounding_box.extents, dtype=float)
-    out = {"bbox_mm": [round(float(v), 1) for v in ext],
-           "bbox_plausible": bool(150.0 <= float(ext.max()) <= 320.0)}
-    if landmarks and "en_l" in landmarks and "en_r" in landmarks:
-        ipd = float(np.linalg.norm(np.asarray(landmarks["en_l"]) -
-                                   np.asarray(landmarks["en_r"])))
-        out["ipd_mm"] = round(ipd, 1)
-        out["ipd_plausible"] = bool(55.0 <= ipd <= 70.0)
-    return out

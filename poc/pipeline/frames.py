@@ -1,126 +1,222 @@
-"""Adim (a): videodan kare cikarma ("ekran goruntusu") + bulanik kare eleme.
+"""Select sharp, temporally distributed frames and normalize pixel geometry."""
 
-Fotogrametrinin girdisi bu karelerdir: video -> kareler -> COLMAP SfM + MVS.
-
-Strateji: videoyu bastan sona bir kez cozup her karenin Laplacian varyansini
-olcer, zaman eksenini pencerelere bolup her pencereden EN KESKIN kareyi
-secer. Boylece hem bulanik kareler elenir hem de kafa etrafindaki acisal
-kapsama korunur (sadece "en keskin 300" alinsa hepsi ayni acidan gelebilirdi).
-
-ffmpeg yerine OpenCV ile cozuyoruz — cunku her secilen karenin KAYNAK KARE
-INDEKSI'ni bilmek zorundayiz: olcek adimi o indeksle ARKit pozunu bulur
-(frames_index.json). ffmpeg'in `fps=` filtresi kareleri yeniden ornekler ve
-bu esleşmeyi sessizce bozar.
-"""
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from ._proc import Ticker
+from poc.logging_utils import ProgressReporter, get_logger
+
+from .arkit import ArkitCapture
+
+ROTATIONS = {"none", "clockwise", "counterclockwise"}
 
 
-def _decode_scores(video: Path) -> np.ndarray:
-    """Her karenin keskinlik skoru (Laplacian varyansi). Tek gecis."""
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        raise RuntimeError(f"Video acilamadi: {video}")
-    n_tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    tick = Ticker("kare cozme", n_tot)
-    scores = []
+@dataclass(frozen=True)
+class ImageTransform:
+    source_to_image: np.ndarray
+    output_size: tuple[int, int]
+
+
+def rotation_transform(source_size: tuple[int, int], rotation: str) -> ImageTransform:
+    """Return the homogeneous source-pixel to oriented-image transform."""
+    width, height = source_size
+    if rotation == "none":
+        matrix = np.eye(3, dtype=np.float64)
+        output_size = (width, height)
+    elif rotation == "clockwise":
+        # (u, v) -> (height - 1 - v, u)
+        matrix = np.asarray([[0.0, -1.0, height - 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        output_size = (height, width)
+    elif rotation == "counterclockwise":
+        # (u, v) -> (v, width - 1 - u)
+        matrix = np.asarray([[0.0, 1.0, 0.0], [-1.0, 0.0, width - 1.0], [0.0, 0.0, 1.0]])
+        output_size = (height, width)
+    else:
+        raise ValueError(f"Unsupported rotation '{rotation}'; expected one of {sorted(ROTATIONS)}")
+    return ImageTransform(matrix, output_size)
+
+
+def _apply_rotation(image: np.ndarray, rotation: str) -> np.ndarray:
+    if rotation == "clockwise":
+        return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+    if rotation == "counterclockwise":
+        return cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return image
+
+
+def transform_intrinsics(
+    intrinsics: np.ndarray,
+    source_size: tuple[int, int],
+    rotation: str,
+    scale: float,
+) -> np.ndarray:
+    """Return a conventional pinhole matrix for the oriented image.
+
+    A raw homogeneous pixel rotation contains off-diagonal focal terms. COLMAP's
+    PINHOLE model instead represents the equivalent rolled camera coordinate
+    system with positive ``fx`` and ``fy`` on the diagonal.
+    """
+    width, height = source_size
+    fx, fy = float(intrinsics[0, 0]), float(intrinsics[1, 1])
+    cx, cy = float(intrinsics[0, 2]), float(intrinsics[1, 2])
+    if rotation == "none":
+        oriented = np.asarray([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]])
+    elif rotation == "clockwise":
+        oriented = np.asarray([[fy, 0.0, height - 1.0 - cy], [0.0, fx, cx], [0.0, 0.0, 1.0]])
+    elif rotation == "counterclockwise":
+        oriented = np.asarray([[fy, 0.0, cy], [0.0, fx, width - 1.0 - cx], [0.0, 0.0, 1.0]])
+    else:
+        raise ValueError(f"Unsupported rotation '{rotation}'")
+    oriented[:2, :] *= scale
+    oriented[2, 2] = 1.0
+    return oriented
+
+
+def _decode_sharpness(video: Path, expected_frames: int) -> np.ndarray:
+    reader = cv2.VideoCapture(str(video))
+    if not reader.isOpened():
+        raise RuntimeError(f"Cannot open RGB video: {video}")
+    scores: list[float] = []
+    progress = ProgressReporter("Decode and score RGB frames", total=expected_frames)
     while True:
-        ok, frame = cap.read()
+        ok, frame = reader.read()
         if not ok:
             break
-        tick.step(len(scores))
-        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        # Skoru kucuk kopyada olc: sonuc siralamasi ayni, cozme suresi degil.
-        g = cv2.resize(g, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
-        scores.append(float(cv2.Laplacian(g, cv2.CV_64F).var()))
-    cap.release()
-    tick.done()
-    if not scores:
-        raise RuntimeError(f"Video'dan hic kare okunamadi: {video}")
-    return np.asarray(scores)
-
-
-def _pick(scores: np.ndarray, n_frames: int, blur_min_var: float) -> list[int]:
-    idx: list[int] = []
-    n_windows = min(n_frames, len(scores))
-    bounds = np.linspace(0, len(scores), n_windows + 1, dtype=int)
-    for i in range(n_windows):
-        lo, hi = bounds[i], bounds[i + 1]
-        if lo >= hi:
-            continue
-        best = lo + int(np.argmax(scores[lo:hi]))
-        if scores[best] < blur_min_var:
-            continue  # pencerenin tamami bulanik -> atla
-        idx.append(best)
-    return idx
-
-
-def _write(video: Path, frames_dir: Path, wanted: list[int],
-           max_dim: int | None) -> list[str]:
-    """Secilen kareleri diske yazar; ikinci sirali gecis (seek guvenilmez)."""
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    want = set(wanted)
-    cap = cv2.VideoCapture(str(video))
-    tick = Ticker("kare yazma", len(wanted))
-    names: list[str] = []
-    i = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if i in want:
-            if max_dim:
-                h, w = frame.shape[:2]
-                if max(h, w) > max_dim:
-                    s = max_dim / float(max(h, w))
-                    frame = cv2.resize(frame, (round(w * s), round(h * s)),
-                                       interpolation=cv2.INTER_AREA)
-            name = f"f{i:06d}.jpg"
-            cv2.imwrite(str(frames_dir / name), frame,
-                        [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-            names.append(name)
-            tick.step(len(names))
-        i += 1
-    cap.release()
-    tick.done()
-    return names
-
-
-def select_frames(video: Path, frames_dir: Path, n_frames: int = 300,
-                  blur_min_var: float = 40.0, max_dim: int | None = 1600,
-                  index_json: Path | None = None) -> list[str]:
-    if not Path(video).exists():
-        raise FileNotFoundError(
-            f"Video bulunamadi: {video} — yolu ve uzantiyi (mp4/MOV) kontrol et.")
-
-    scores = _decode_scores(Path(video))
-    wanted = _pick(scores, n_frames, blur_min_var)
-    if len(wanted) < 60:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.resize(gray, (0, 0), fx=0.35, fy=0.35, interpolation=cv2.INTER_AREA)
+        scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
+        progress.update(len(scores))
+    reader.release()
+    progress.finish(detail=f"decoded {len(scores)} frames")
+    if abs(len(scores) - expected_frames) > 1:
         raise RuntimeError(
-            f"Sadece {len(wanted)} keskin kare bulundu (<60). Cekim cok "
-            "bulanik — AE/AF kilidi, daha yavas ve duzgun bir yay, daha iyi "
-            "isik ile tekrar cek.")
+            f"Decoded RGB frame count ({len(scores)}) does not match capture records "
+            f"({expected_frames})"
+        )
+    return np.asarray(scores, dtype=np.float64)
 
-    names = _write(Path(video), frames_dir, wanted, max_dim)
 
-    if index_json is not None:
-        index_json.parent.mkdir(parents=True, exist_ok=True)
-        index_json.write_text(json.dumps({
-            "video": str(video),
-            "n_source_frames": int(len(scores)),
-            "max_dim": max_dim,
-            # Olcek adimi bunu kullanir: goruntu adi -> kaynak kare indeksi
-            "frame_of_image": {n: int(n[1:-4]) for n in names},
-        }, indent=2))
+def _select_indices(
+    scores: np.ndarray,
+    timestamps: np.ndarray,
+    target_count: int,
+    minimum_sharpness: float,
+) -> list[int]:
+    """Pick the sharpest frame in equal-duration windows."""
+    count = min(target_count, len(scores))
+    edges = np.linspace(timestamps[0], timestamps[-1] + 1e-9, count + 1)
+    selected: list[int] = []
+    for start, end in pairwise(edges):
+        candidates = np.flatnonzero((timestamps >= start) & (timestamps < end))
+        if not len(candidates):
+            continue
+        best = int(candidates[np.argmax(scores[candidates])])
+        if scores[best] >= minimum_sharpness:
+            selected.append(best)
+    if len(selected) < 60:
+        raise RuntimeError(
+            f"Only {len(selected)} sharp frames were found. Improve lighting and move the phone "
+            "more slowly before repeating the capture."
+        )
+    return selected
 
-    print(f"[frames] {len(scores)} kaynak kare -> {len(names)} secildi "
-          f"(medyan keskinlik {np.median(scores):.0f}, "
-          f"esik {blur_min_var:.0f})")
-    return names
+
+def select_frames(
+    capture: ArkitCapture,
+    output_dir: Path,
+    index_path: Path,
+    *,
+    target_count: int = 120,
+    minimum_sharpness: float = 35.0,
+    max_dimension: int | None = 1400,
+    rotation: str = "clockwise",
+) -> list[str]:
+    """Decode selected frames and write an explicit pixel transform for each image."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scores = _decode_sharpness(capture.rgb_path, capture.n_frames)
+    usable_count = min(len(scores), capture.n_frames)
+    selected = _select_indices(
+        scores[:usable_count], capture.timestamps[:usable_count], target_count, minimum_sharpness
+    )
+
+    base_transform = rotation_transform(capture.rgb_size, rotation)
+    oriented_width, oriented_height = base_transform.output_size
+    scale = 1.0
+    if max_dimension and max(oriented_width, oriented_height) > max_dimension:
+        scale = max_dimension / float(max(oriented_width, oriented_height))
+    output_size = (round(oriented_width * scale), round(oriented_height * scale))
+    resize_transform = np.asarray([[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, 1.0]])
+    source_to_image = resize_transform @ base_transform.source_to_image
+
+    reader = cv2.VideoCapture(str(capture.rgb_path))
+    wanted = set(selected)
+    entries: dict[str, dict] = {}
+    progress = ProgressReporter("Write selected RGB frames", total=len(selected))
+    frame_index = 0
+    written = 0
+    while True:
+        ok, image = reader.read()
+        if not ok:
+            break
+        if frame_index in wanted:
+            image = _apply_rotation(image, rotation)
+            if scale != 1.0:
+                image = cv2.resize(image, output_size, interpolation=cv2.INTER_AREA)
+            name = f"frame_{frame_index:06d}.jpg"
+            destination = output_dir / name
+            if not cv2.imwrite(str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, 96]):
+                raise RuntimeError(f"Failed to write selected frame: {destination}")
+
+            effective_k = transform_intrinsics(
+                capture.frame(frame_index).intrinsics,
+                capture.rgb_size,
+                rotation,
+                scale,
+            )
+            entries[name] = {
+                "frame_id": frame_index,
+                "timestamp": capture.frame(frame_index).timestamp,
+                "sharpness": round(float(scores[frame_index]), 3),
+                "source_to_image": source_to_image.tolist(),
+                "intrinsics": effective_k.tolist(),
+                "image_size": list(output_size),
+            }
+            written += 1
+            progress.update(written)
+        frame_index += 1
+    reader.release()
+    progress.finish()
+
+    if written != len(selected):
+        raise RuntimeError(f"Expected to write {len(selected)} frames but wrote {written}")
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "source_video": str(capture.rgb_path),
+                "source_size": list(capture.rgb_size),
+                "rotation": rotation,
+                "target_count": target_count,
+                "selected_count": written,
+                "images": entries,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    get_logger().info(
+        "Frame selection complete | %d/%d selected | output %dx%d | median sharpness %.1f",
+        written,
+        capture.n_frames,
+        output_size[0],
+        output_size[1],
+        float(np.median(scores[selected])),
+    )
+    return list(entries)

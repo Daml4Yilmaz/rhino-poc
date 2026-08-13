@@ -1,208 +1,401 @@
-"""Tek komut: poc process CAPTURE --out vaka_001
+"""Command-line interface for metric facial reconstruction."""
 
-CAPTURE = Stray Scanner klasoru (odometry.csv iceren) veya Record3D .r3d.
-Icindeki video kareye ayrilir, fotogrametri (COLMAP SfM + MVS) 3D modeli
-uretir; ARKit pozu/LiDAR'i SADECE mm carpanini bulmak icin okunur.
-
-Adimlar sirayla kosar; --until ile erken durabilir, ara ciktilar vaka
-klasorunde birikir. Hafta-2 adimlari (mask/gs/flame) stub — atlanir.
-"""
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Annotated, Any
 
 import typer
 
-from .config import Config
+from .config import ReconstructionConfig
+from .logging_utils import configure_logging, format_duration, get_logger
+from .state import CaseManifest, stage_signature
 
-app = typer.Typer(add_completion=False, pretty_exceptions_enable=False)
+app = typer.Typer(
+    add_completion=False,
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    help="Metric facial surface reconstruction from Stray Scanner capture data.",
+)
 
-STEPS = ["frames", "sfm", "mvs", "scale", "export", "measure"]
+STAGES = ("ingest", "mask", "sfm", "scale", "mvs", "export", "landmarks", "measure")
 
 
-VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".avi"}
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
 
 
-def _require_exists(capture: Path) -> None:
-    """Yol yoksa komsu dosyalari listeleyerek dur.
-
-    Colab'da Drive mount'u Linux tarafinda BUYUK-KUCUK HARF DUYARLI; iPhone
-    videolari .MOV yazar, yolu .mov diye verince dosya 'yok' sayilir. Bu en
-    sik dusulen tuzak oldugu icin ayrica isaret ediyoruz.
-    """
-    if capture.exists():
-        return
-    parent = capture.parent
-    lines = [f"Yol bulunamadi: {capture}"]
-    if parent.is_dir():
-        names = sorted(p.name + ("/" if p.is_dir() else "")
-                       for p in parent.iterdir())
-        near = [n for n in names
-                if n.lower().rstrip("/") == capture.name.lower()]
-        if near:
-            lines.append(f"AMA su var: {near[0]} — sadece BUYUK/KUCUK HARF "
-                         "farki. Linux'ta bu iki ayri dosyadir.")
-        lines.append(f"{parent} icinde ({len(names)} oge):")
-        lines += [f"  {n}" for n in names[:25]]
-        if len(names) > 25:
-            lines.append(f"  ... (+{len(names) - 25})")
-    else:
-        lines.append(f"Ust klasor de yok: {parent}")
-    raise typer.BadParameter("\n".join(lines))
+def _run_stage(
+    manifest: CaseManifest,
+    name: str,
+    parameters: dict[str, Any],
+    outputs: list[Path],
+    action: Callable[[], dict[str, Any] | None],
+    *,
+    dependency_signature: str = "",
+    resume: bool,
+) -> str:
+    signature = stage_signature(
+        name, manifest.capture_hash, parameters, dependency=dependency_signature
+    )
+    if resume and manifest.is_current(name, signature, outputs):
+        get_logger().info("Stage %-10s | skipped; outputs and parameters are current", name)
+        return signature
+    if resume and manifest.has_stale_record(name, signature):
+        raise RuntimeError(
+            f"Cannot resume stage '{name}' because its inputs or parameters changed. "
+            "Use a new output directory or run without --resume to rebuild it."
+        )
+    for output in outputs:
+        _remove_path(output)
+    manifest.start(name, signature, parameters)
+    started_at = time.monotonic()
+    get_logger().info("Stage %-10s | started", name)
+    try:
+        metadata = action() or {}
+    except Exception as error:
+        manifest.fail(name, error)
+        raise
+    metadata["elapsed_seconds"] = round(time.monotonic() - started_at, 3)
+    manifest.complete(name, metadata)
+    get_logger().info(
+        "Stage %-10s | complete in %s", name, format_duration(metadata["elapsed_seconds"])
+    )
+    return signature
 
 
 @app.command()
-def process(
-    capture: Path = typer.Argument(..., help="Stray Scanner klasoru, .r3d, veya duz video (TEST)"),
-    out: Path = typer.Option(..., "--out", help="Vaka cikti klasoru"),
-    n_frames: int = typer.Option(300, help="Secilecek kare sayisi"),
-    max_dim: int = typer.Option(1600, help="COLMAP karesinin uzun kenari (0=kucultme)"),
-    mvs_cache_gb: int = typer.Option(0, help="MVS onbellegi GB (0=RAM'e gore otomatik)"),
-    mvs_max_dim: int = typer.Option(0, help="MVS'te goruntu uzun kenari (0=kirpma yok)"),
-    mvs_src_images: int = typer.Option(10, help="Her referans icin komsu sayisi"),
-    mvs_refs: int = typer.Option(150, help="MVS referans goruntu ust siniri (0=hepsi)"),
-    mvs_geom: bool = typer.Option(True, "--mvs-geom/--no-mvs-geom",
-                                  help="Geometrik tutarlilik gecisi (kapatmak ~4x hizlandirir)"),
-    until: str = typer.Option("measure", help=f"Bu adimdan sonra dur: {STEPS}"),
-    sift_gpu: bool = typer.Option(True, "--sift-gpu/--no-sift-gpu",
-                                  help="COLMAP SIFT'i GPU'da kos (macOS'ta kapat)"),
-    matcher: str = typer.Option("sequential", help="sequential | exhaustive"),
-    resume: bool = typer.Option(False, "--resume", help="Var olan ara ciktilari atla"),
-):
-    t0 = time.time()
-    cfg = Config(out_dir=out, n_frames=n_frames, use_gpu=sift_gpu,
-                 max_dim=max_dim or None)
-    out.mkdir(parents=True, exist_ok=True)
-    stop = STEPS.index(until)
+def inspect(
+    capture: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Print machine-readable JSON.")
+    ] = False,
+) -> None:
+    """Validate a Stray export without starting reconstruction."""
+    configure_logging()
+    from .pipeline.arkit import load_capture
 
-    # Girdi ya ARKit yakalamasi ya da (SADECE TEST icin) duz video.
-    # Once VARLIK kontrolu: yol yoksa sessizce ARKit dalina dusup "taninmayan
-    # bicim" demek yaniltici olur, asil sebep yolun yanlis olmasidir.
-    _require_exists(capture)
-    test_mode = capture.is_file() and capture.suffix.lower() in VIDEO_SUFFIXES
-    if test_mode:
-        print("=" * 70)
-        print("[poc] TEST MODU: duz video — ARKit pozu yok, LiDAR yok.")
-        print("[poc] Fotogrametri (frames+sfm+mvs) kosar, OLCEK KOSMAZ.")
-        print("[poc] Cikan model BIRIMSIZ olur: acilar ve Goode orani anlamli,")
-        print("[poc] mm cinsinden uzunluk/genislik/sapma URETILEMEZ.")
-        print("=" * 70)
-        video, cap = capture, None
-    else:
-        from .pipeline.arkit import load_capture
-        cap = load_capture(capture)
-        video = cap.rgb_path
+    loaded = load_capture(capture)
+    summary = loaded.validation_summary or {}
+    if json_output:
+        typer.echo(json.dumps(summary, indent=2))
 
-    # 1. frames — videodan kare cikar (kaynak kare indeksleri korunur)
-    if resume and cfg.frames_index().exists():
-        print(f"[frames] atlandi (resume): {cfg.frames_dir()} mevcut")
-    else:
-        _step(1, "KARE SECIMI")
+
+@app.command("download-models")
+def download_models(
+    output_dir: Annotated[
+        Path, typer.Option("--output-dir", "-o", help="Model asset directory.")
+    ] = Path("models"),
+) -> None:
+    """Download the official MediaPipe model required for masking and landmarks."""
+    configure_logging()
+    from .model_assets import download_face_landmarker
+
+    typer.echo(str(download_face_landmarker(output_dir)))
+
+
+@app.command()
+def reconstruct(
+    capture: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    output: Annotated[Path, typer.Option("--output", "-o", help="Case output directory.")],
+    face_landmarker_model: Annotated[
+        Path,
+        typer.Option(
+            "--face-landmarker-model",
+            exists=True,
+            dir_okay=False,
+            help="MediaPipe face_landmarker.task path; obtain it with 'poc download-models'.",
+        ),
+    ],
+    until: Annotated[str, typer.Option(help=f"Final stage: {', '.join(STAGES)}")] = "measure",
+    resume: Annotated[
+        bool, typer.Option(help="Reuse only manifest-verified stage outputs.")
+    ] = False,
+    frame_count: Annotated[int, typer.Option(min=60, max=240)] = 120,
+    max_dimension: Annotated[int, typer.Option(min=800, max=1920)] = 1400,
+    rotation: Annotated[
+        str, typer.Option(help="none, clockwise, or counterclockwise")
+    ] = "clockwise",
+    sift_gpu: Annotated[bool, typer.Option("--sift-gpu/--no-sift-gpu")] = True,
+    matcher: Annotated[str, typer.Option(help="sequential or exhaustive")] = "sequential",
+    mvs_references: Annotated[int, typer.Option(min=40, max=160)] = 96,
+    mvs_source_images: Annotated[int, typer.Option(min=4, max=12)] = 6,
+    mvs_geometric: Annotated[bool, typer.Option("--mvs-geometric/--no-mvs-geometric")] = False,
+    mvs_cache_gb: Annotated[int, typer.Option(min=0, max=12)] = 0,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+) -> None:
+    """Run the complete surface reconstruction and measurement pipeline."""
+    if until not in STAGES:
+        raise typer.BadParameter(f"Unknown stage '{until}'; expected one of {STAGES}")
+    output = output.expanduser().resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    config = ReconstructionConfig(
+        output_dir=output,
+        frame_count=frame_count,
+        frame_max_dimension=max_dimension,
+        rotation=rotation,
+        mvs_reference_count=mvs_references,
+        mvs_source_images=mvs_source_images,
+        mvs_geometric_consistency=mvs_geometric,
+        mvs_cache_gb=mvs_cache_gb or None,
+    )
+    configure_logging(config.log_path, verbose=verbose)
+    logger = get_logger()
+    logger.info("Case output | %s", output)
+    logger.info("Detailed log | %s", config.log_path)
+
+    from .pipeline.arkit import load_capture
+
+    loaded_capture = load_capture(capture)
+    manifest = CaseManifest(config.manifest_path, capture)
+    stop_index = STAGES.index(until)
+    dependency = ""
+
+    ingest_parameters = {
+        "frame_count": config.frame_count,
+        "minimum_sharpness": config.minimum_sharpness,
+        "max_dimension": config.frame_max_dimension,
+        "rotation": config.rotation,
+    }
+
+    def ingest_action() -> dict:
         from .pipeline.frames import select_frames
-        select_frames(video, cfg.frames_dir(), cfg.n_frames,
-                      cfg.blur_min_var, cfg.max_dim, cfg.frames_index())
-    if stop < 1:
-        return _done(t0)
 
-    # 2. sfm — fotogrametri, birimsiz
-    model = cfg.sparse_dir() / "0"
-    if resume and (model / "cameras.bin").exists():
-        print(f"[sfm] atlandi (resume): {model} mevcut")
-    else:
-        _step(2, "SfM — fotogrametri (birimsiz)")
+        capture_summary = loaded_capture.validation_summary or {}
+        names = select_frames(
+            loaded_capture,
+            config.images_dir,
+            config.frame_index_path,
+            target_count=config.frame_count,
+            minimum_sharpness=config.minimum_sharpness,
+            max_dimension=config.frame_max_dimension,
+            rotation=config.rotation,
+        )
+        return {"capture": capture_summary, "selected_images": len(names)}
+
+    dependency = _run_stage(
+        manifest,
+        "ingest",
+        ingest_parameters,
+        [config.images_dir, config.frame_index_path],
+        ingest_action,
+        resume=resume,
+    )
+    if stop_index == 0:
+        return
+
+    model_digest = hashlib.sha256(face_landmarker_model.read_bytes()).hexdigest()
+    mask_parameters = {
+        "method": "mediapipe_tasks_face_landmarker_convex_hull_v1",
+        "model_sha256": model_digest,
+    }
+
+    def mask_action() -> dict:
+        from .pipeline.masking import run_masking
+
+        return run_masking(
+            config.images_dir,
+            config.masks_dir,
+            config.reconstruction_images_dir,
+            face_landmarker_model,
+        )
+
+    dependency = _run_stage(
+        manifest,
+        "mask",
+        mask_parameters,
+        [config.masks_dir, config.reconstruction_images_dir],
+        mask_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    if stop_index == 1:
+        return
+
+    sfm_parameters = {
+        "sift_gpu": sift_gpu,
+        "matcher": matcher,
+        "sequential_overlap": config.sequential_overlap,
+    }
+    selected_sparse_model: Path | None = None
+
+    def sfm_action() -> dict:
+        nonlocal selected_sparse_model
         from .pipeline.sfm import run_sfm
-        fmap = None
-        if cap is not None and cfg.frames_index().exists():
-            fmap = json.loads(cfg.frames_index().read_text())["frame_of_image"]
-        model = run_sfm(cfg.frames_dir(), cfg.colmap_dir(), cfg.colmap_bin,
-                        cfg.camera_model, cfg.seq_overlap, cfg.use_gpu, matcher,
-                        capture=cap, frame_of_image=fmap)
-    if stop < 2:
-        return _done(t0)
 
-    # 3. mvs — yogun yuzey (CUDA sart; macOS'ta Colab'a devret)
-    mesh_raw = out / "mesh_raw.ply"
-    if resume and mesh_raw.exists():
-        print(f"[mvs] atlandi (resume): {mesh_raw} mevcut")
-    else:
-        _step(3, "MVS — yogun yuzey (en uzun adim)")
-        from .pipeline.mvs import run_mvs
-        mesh_raw = run_mvs(cfg.frames_dir(), model, cfg.dense_dir(),
-                           cfg.colmap_bin, cfg.poisson_depth, cfg.poisson_trim,
-                           cache_size_gb=mvs_cache_gb or None,
-                           max_image_size=mvs_max_dim or None,
-                           src_images=mvs_src_images, max_refs=mvs_refs,
-                           geom_consistency=mvs_geom)
-    if stop < 3:
-        return _done(t0)
+        selected_sparse_model = run_sfm(
+            config.reconstruction_images_dir,
+            config.frame_index_path,
+            config.colmap_dir,
+            masks_dir=config.masks_dir,
+            colmap_binary=config.colmap_binary,
+            use_gpu=sift_gpu,
+            sequential_overlap=config.sequential_overlap,
+            matcher=matcher,
+        )
+        (config.colmap_dir / "selected_sparse_model.txt").write_text(
+            str(selected_sparse_model.resolve()), encoding="utf-8"
+        )
+        return {"selected_model": selected_sparse_model.name}
 
-    # 4. scale — markersiz: ARKit poz (+ LiDAR capraz kontrol)
-    scale_json = out / "scale.json"
-    if test_mode:
-        print("[scale] TEST MODU — atlandi. Model birimsiz kalacak.")
-        scale = 1.0
-    elif resume and scale_json.exists():
-        scale = json.loads(scale_json.read_text())["scale_mm_per_unit"]
-        print(f"[scale] atlandi (resume): {scale:.6f} mm/birim")
-    else:
-        _step(4, "OLCEK — ARKit poz + LiDAR")
+    dependency = _run_stage(
+        manifest,
+        "sfm",
+        sfm_parameters,
+        [config.colmap_dir / "selected_sparse_model.txt"],
+        sfm_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    selected_sparse_model = Path(
+        (config.colmap_dir / "selected_sparse_model.txt").read_text(encoding="utf-8").strip()
+    )
+    if stop_index == 2:
+        return
+
+    scale_parameters = {"maximum_disagreement_percent": config.scale_agreement_percent}
+
+    def scale_action() -> dict:
         from .pipeline.scale import compute_scale
-        masks = cfg.masks_dir() if cfg.masks_dir().is_dir() else None
-        scale = compute_scale(out, model, capture, scale_json, masks,
-                              cfg.scale_agreement_pct)
-    if stop < 4:
-        return _done(t0)
 
-    # 5. export — test modunda birimsiz oldugunu dosya adindan belli et
-    _step(5, "EXPORT — renkli GLB")
-    from .pipeline.export import export_glb
-    glb = out / ("model_unitless.glb" if test_mode else "model.glb")
-    export_glb(mesh_raw, scale, glb)
-    if stop < 5:
-        return _done(t0)
+        scale = compute_scale(
+            selected_sparse_model,
+            loaded_capture,
+            config.frame_index_path,
+            config.scale_path,
+            masks_dir=config.masks_dir,
+            maximum_disagreement_percent=config.scale_agreement_percent,
+        )
+        return {"scale_mm_per_unit": scale}
 
-    # 6. measure — landmarks.json varsa (hafta 2'de FLAME uretir)
-    lm = out / "landmarks.json"
-    if lm.exists():
-        from .pipeline.measure import run_measure
-        run_measure(lm, out / "measurements.json")
-    else:
-        print("[measure] landmarks.json yok — atlandi "
-              "(hafta 2: FLAME kaydi uretecek).")
-    _done(t0)
+    dependency = _run_stage(
+        manifest,
+        "scale",
+        scale_parameters,
+        [config.scale_path],
+        scale_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    scale_mm_per_unit = float(
+        json.loads(config.scale_path.read_text(encoding="utf-8"))["scale_mm_per_unit"]
+    )
+    if stop_index == 3:
+        return
 
+    mvs_parameters = {
+        "reference_count": config.mvs_reference_count,
+        "source_images": config.mvs_source_images,
+        "geometric_consistency": config.mvs_geometric_consistency,
+        "cache_gb": config.mvs_cache_gb,
+        "poisson_depth": config.poisson_depth,
+    }
 
-def _step(n: int, name: str) -> None:
-    print(f"\n{'='*62}\n[{n}/6] {name}\n{'='*62}", flush=True)
+    def mvs_action() -> dict:
+        from .pipeline.mvs import run_mvs
 
+        run_mvs(
+            config.reconstruction_images_dir,
+            selected_sparse_model,
+            config.dense_dir,
+            config.raw_mesh_path,
+            colmap_binary=config.colmap_binary,
+            cache_size_gb=config.mvs_cache_gb,
+            max_image_size=config.mvs_max_image_size,
+            source_images=config.mvs_source_images,
+            maximum_references=config.mvs_reference_count,
+            geometric_consistency=config.mvs_geometric_consistency,
+            poisson_depth=config.poisson_depth,
+        )
+        return {"mesh": str(config.raw_mesh_path)}
 
-def _done(t0: float) -> None:
-    print(f"[poc] bitti — {time.time() - t0:.0f} sn")
+    dependency = _run_stage(
+        manifest,
+        "mvs",
+        mvs_parameters,
+        [config.raw_mesh_path],
+        mvs_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    if stop_index == 4:
+        return
 
+    def export_action() -> dict:
+        from .pipeline.export import export_glb
 
-@app.command()
-def scale(
-    capture: Path = typer.Argument(..., help="Stray Scanner klasoru veya .r3d"),
-    out: Path = typer.Option(..., "--out", help="Vaka klasoru (frames_index.json burada)"),
-):
-    """Sadece olcek: ARKit pozu + LiDAR -> scale.json"""
-    from .pipeline.scale import compute_scale
-    cfg = Config(out_dir=out)
-    masks = cfg.masks_dir() if cfg.masks_dir().is_dir() else None
-    compute_scale(out, cfg.sparse_dir() / "0", capture, out / "scale.json",
-                  masks, cfg.scale_agreement_pct)
+        export_glb(config.raw_mesh_path, scale_mm_per_unit, config.glb_path)
+        return {"glb": str(config.glb_path), "units": "metres"}
 
+    dependency = _run_stage(
+        manifest,
+        "export",
+        {"glb_units": "metres"},
+        [config.glb_path],
+        export_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    if stop_index == 5:
+        return
 
-@app.command()
-def measure(
-    landmarks: Path = typer.Argument(..., help="landmarks.json (mm)"),
-    out: Path = typer.Option(Path("measurements.json"), "--out"),
-):
-    """Sadece olcum: landmarks.json -> measurements.json"""
-    from .pipeline.measure import run_measure
-    run_measure(landmarks, out)
+    def landmarks_action() -> dict:
+        from .pipeline.landmarks import triangulate_landmarks
+
+        result = triangulate_landmarks(
+            config.reconstruction_images_dir,
+            selected_sparse_model,
+            config.frame_index_path,
+            config.raw_mesh_path,
+            scale_mm_per_unit,
+            config.landmarks_path,
+            face_landmarker_model,
+        )
+        return {"landmark_count": len(result["landmarks"]), "definition": result["definition"]}
+
+    dependency = _run_stage(
+        manifest,
+        "landmarks",
+        {
+            "definition": "provisional_mediapipe_surface_landmarks_v1",
+            "model_sha256": model_digest,
+        },
+        [config.landmarks_path],
+        landmarks_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    if stop_index == 6:
+        return
+
+    def measure_action() -> dict:
+        from .pipeline.measure import run_measurements
+
+        measurements = run_measurements(config.landmarks_path, config.measurements_path)
+        return {"measurement_count": len(measurements)}
+
+    _run_stage(
+        manifest,
+        "measure",
+        {"definition": "provisional_surface_rhinoplasty_measurements_v1"},
+        [config.measurements_path],
+        measure_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    logger.info(
+        "Pipeline complete | model: %s | measurements: %s",
+        config.glb_path,
+        config.measurements_path,
+    )
 
 
 if __name__ == "__main__":

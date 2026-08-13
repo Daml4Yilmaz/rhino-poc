@@ -1,205 +1,179 @@
-# rhino-poc
+# Rhino PoC
 
-Telefonla çekilmiş video → gerçek ölçekli 3D yüz modeli + 6 otomatik rinoplasti ölçümü + kumpasla karşılaştırmalı hata raporu.
+Metric facial surface reconstruction and six provisional rhinoplasty measurements from an
+iPhone 14 Pro Max Stray Scanner capture.
 
-**Yöntem: fotogrametri.** Video kareye ayrılır ("ekran görüntüsü"), 3D model bu karelerden COLMAP SfM + MVS ile üretilir. Marker (ArUco/ChArUco) **kullanılmaz**.
+> **Research software:** this repository is not a medical device and its measurements are not
+> validated for clinical use.
 
-Fotogrametri şekli verir, **milimetreyi vermez** — aynı kareler 50 mm'lik burunla da 500 mm'lik burunla da tutarlıdır; mutlak boyut görüntülerin içinde yoktur. Marker olmadığı için mm çarpanı telefonun kendi metrik takibinden (ARKit VIO + LiDAR) okunur. Bu veri modeli **üretmez**, sadece "1 COLMAP birimi kaç mm" sayısını verir. Ayrıntı: `poc/pipeline/scale.py`.
+## Current objective
 
-Tek komut: `poc process <yakalama> --out vaka_001`
+The first milestone is deliberately narrow:
 
-## Çekim protokolü — iki kişi, iki geçiş
+- input: one complete Stray Scanner export;
+- output: a clean, metric skin-surface mesh;
+- measurements: nasofrontal angle, nasolabial angle, Goode ratio, nasal length, nasal width,
+  and tip midline deviation;
+- runtime target: less than one hour on a Google Colab T4 GPU.
 
-Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
+FLAME fitting, subcutaneous anatomy, surgical morphing, Gaussian splatting, mobile application
+development, and clinical validation are outside this milestone.
 
-**Hazırlık**
-- [ ] Denek oturur, sırt dayalı, ayaklar yerde (başlıklı koltuk daha iyi)
-- [ ] Saç tamamen bone altında, kulaklar açıkta, gözlük/küpe yok
-- [ ] Gözler **3 m ötede işaretli bir noktada** sabit — telefonu takip etmek başı döndürür
-- [ ] **İfadesiz yüz, ağız kapalı, konuşma yok** (SfM hareketli sahnede çöker)
-- [ ] Mat cilt (parlıyorsa şeffaf pudra) — parlamalar kamerayla birlikte hareket eder ve geometri sanılır
+## Why Stray Scanner is required
 
-**Ortam (önceki sürümlerden değişti)**
-- [ ] Arka plan **sabit ve DOKULU** — düz/boş fon değil. ARKit'in takibi ortam özniteliği ister; denek sabit olduğu için oda ve yüz tek bir katı sahne oluşturur ve arka plan SfM'e de yardım eder. Fon geometrisi sonradan maskelenir (ucuz); bozuk takip geri gelmez.
-- [ ] Karede hareket eden hiçbir şey yok (başka kişi, ekran, pencere)
-- [ ] Dağınık, eşit ve **sabit** ışık; bantlanma (flicker) olmadığını doğrula
+A normal Camera-app MOV contains RGB pixels but no exported ARKit trajectory or LiDAR depth.
+Monocular photogrammetry determines shape only up to an arbitrary scale. A complete Stray export
+provides:
 
-**Telefon**
-- [ ] Arka ana kamera, **zoom tam 1.0×** ve hiç dokunulmadan (lens değişimi odak uzaklığını değiştirir, tek-kamera varsayımını sessizce bozar)
-- [ ] **Otofokus:** Stray Scanner AF kilidi sunmuyor — gerek de yok. ARKit her karenin `fx, fy, cx, cy` değerini `odometry.csv`'ye yazar; `sfm.py` bunları doğrudan COLMAP veritabanına yazıp bundle adjustment'ın odak uzaklığını değiştirmesini engeller. Bu **kilitten daha iyidir**: kilit sabitliği varsayar, bu ise ölçülmüş gerçek değeri kullanır. Test kaydında odak %3.3 oynamıştı ve model bunu sorunsuz taşıdı.
-- [ ] Yine de AF avlanmasını azalt: mesafeyi sabit tut (AF derinlik değişince arar), kaydı yüz zaten çerçevedeyken başlat ve 2 sn bekle, yüksek kontrastlı fon geçişlerinde süpürme.
-- [ ] Kayıt uygulaması: **Stray Scanner** veya Record3D. **iPhone'un kendi Kamera uygulaması yetmez** — o yalnızca pikselleri kaydeder, ARKit kamera pozunu ve LiDAR derinliğini dosyaya yazmaz. Ölçek videonun içinde değil, çekim anındaki hareket takibindedir; kayıt bittikten sonra geri gelmez. Stok Kamera 4K (8.3 MP) ile daha iyi doku verir ama **milimetre vermez** → yalnızca açılar ve Goode oranı hesaplanabilir, G1 karşılanamaz.
-  - Stray Scanner LiDAR'lı cihaz ister (iPhone 12 Pro ve sonrası; 14 Pro Max uygun). LiDAR yoksa Record3D yalnız ARKit poziyle çalışır, `s_depth` çapraz kontrolü devre dışı kalır.
-  - 1920×1440 yeterli mi? Ölçülen `fx ≈ 1380 px`, mesafe 65 cm → **~2.1 piksel/mm** (yüz kare genişliğinin ~%30'unu kaplar). 2 mm hedefi için yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
-
-**Geçiş 1 — göz hizası, kulaktan kulağa**
-- [ ] Sağ kulaktan sol kulağa (ya da tersi — hangisi olduğunu kendin not al; `case.json` manifesti henüz yazılmadı), 180°
-- [ ] Kamera deneğin **göz hizasında**, lens buruna dönük
-- [ ] Mesafe **60–70 cm**, sabit
-- [ ] **25–35 sn**, topuk-parmak yürüyüş, iki el telefonda, dirsekler gövdeye dayalı
-- [ ] Duraklama zararsız; ani hızlanma zararlı (kare bulanır, takip sarsılır)
-
-**Geçiş 2 — alçak açı, yukarı eğik (burun tabanı)**
-- [ ] Kamera deneğin göğüs/çene hizasına iner, **~30° yukarı eğik** — iki burun deliği, kolumella ve alar oluk net görünmeli
-- [ ] Aynı yay, **15–25 sn**, aynı mesafe
-- [ ] 6 ölçümün dördü bu geçişin geometrisine dayanır. Tekrar çekilecek tek geçiş varsa budur.
-
-**Geçişler arası:** deneği gevşet, sonra yeniden yerleştir ve işarete odaklat. İki kısa duruş, tek uzun duruştan iyidir. **Kaydı geçişler arasında durdurma** — tek oturum tek metrik çerçeve demektir, ölçek bunun üstüne kurulur.
-
-## Kurulum
-
-**Yerel (macOS, M-serisi) — GPU gerektirmeyen her şey burada koşar**
-```bash
-brew install colmap
-uv venv && uv pip install -e .
-poc process vaka_001_stray/ --out vaka_001 --no-sift-gpu --until sfm
+```text
+capture/
+├── rgb.mp4
+├── odometry.csv
+├── camera_matrix.csv
+├── depth/
+└── confidence/
 ```
 
-Not: macOS'ta COLMAP CUDA'sız derlenir — beklenen. `mvs` adımı yerelde koşmaz, `--until sfm` ile durdur.
+The pipeline uses explicit exported frame IDs and timestamps. It never assumes that the nominal
+MP4 frame rate is the true capture rate.
 
-**Colab (sadece GPU gereken adımlar: `mvs`, ileride `gsplat`)**
-1. Colab'da `File > Open notebook > GitHub` → `Daml4Yilmaz/rhino-poc` → `colab_setup.ipynb`. Notebook kodu repodan çeker; Drive'a repo yüklemek gerekmez, Drive yalnızca veri ve çıktı için.
-2. Hücreleri sırayla koş. Hesaplama `/content`'te yapılır (Drive FUSE üzerinde COLMAP MVS on binlerce küçük dosya yazdığı için çok yavaştır); sonuçlar son hücrede `MyDrive/rhino-poc-out/<vaka>/` altına kopyalanır.
-3. Colab'da OpenCV **kurma** — hazır geleni kullan. Üstüne `opencv-contrib-python` kurulunca `cv2` yarım yükleniyor (`SIFT_create` çalışır, `CascadeClassifier` kaybolur). ArUco bırakıldığı için contrib gereksiz.
+## Recommended execution: Google Colab
 
-Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. Geri kalan her şey M4 Pro'da koşar; Colab'ın ücretsiz kotası bir kez oturum ortasında tükendiği için Colab'a tek adım devredilir. Ayrıntı: `PLAN.md` §4.
+Open [`colab_reconstruction.ipynb`](colab_reconstruction.ipynb) in Colab and select a **T4 GPU**.
+The notebook is linear and has three phases:
 
-**Kurulum sürümü doğrulanır.** `pip install` aynı sürümü "already satisfied" deyip atlayabildiği için notebook `poc.__version__` yazdırıp asgari sürümü kontrol eder. Eski sürüm görürsen 1. hücreyi (git reset) ve pip hücresini tekrar koş; hâlâ eskiyse `Runtime > Restart session`. Bu kontrol olmadan eskimiş kod sessizce koşar ve düzeltilmiş bir hata düzeltilmemiş gibi görünür.
+1. install and verify CUDA-enabled COLMAP;
+2. download the official MediaPipe model, validate the capture, and build a metric sparse
+   checkpoint;
+3. run dense reconstruction, export, landmarks, and measurements.
 
-**Colab akışı 4B'de üçe bölünür:** yolları tanımla → `--until sfm` + sparse modeli Drive'a yedekle → MVS. `/content` geçici olduğu için, bağlantı MVS sırasında koparsa tamamlanmış SfM'i kaybetmemek gerekir. Hepsinde `--resume` var; temiz vakada etkisiz, yarım kalanda tamamlananları atlar.
+The notebook runs compute-intensive work on `/content`, not through Google Drive's FUSE layer.
+It copies checkpoints and final artifacts back to Drive.
 
-### MVS bellek ayarı
+Default Colab settings are intentionally bounded:
 
-COLMAP'in bellek varsayılanları paylaşımlı ortamlar için fazla cömert ve aşıldığında süreç **`SIGKILL`** ile ölür — hata mesajı yok, sadece sinyal:
+| Setting | Default | Rationale |
+|---|---:|---|
+| Selected frames | 120 | Removes temporal redundancy from the 1,295-frame reference capture. |
+| Long image dimension | 1,400 px | Preserves facial detail while reducing PatchMatch cost. |
+| MVS references | 96 | Uniform coverage without processing every selected view densely. |
+| Source images/reference | 6 | Appropriate initial budget for a small, highly overlapping subject. |
+| Geometric consistency | Off | Photometric-first benchmark for the sub-hour target. |
 
-| Ayar | COLMAP varsayılanı | Bizde |
-|---|---|---|
-| `PatchMatchStereo.cache_size` | 32 GB | RAM'in %30'u, 2–8 GB arası |
-| `StereoFusion.cache_size` | 32 GB | aynı değer |
-| `StereoFusion.use_cache` | **0** (her şeyi belleğe alır) | 1 |
+These settings are a benchmark configuration, not a validated optimum. Quality and runtime must be
+recorded before increasing them.
 
-Önbellek boyutu **kaliteyi etkilemez**, yalnızca disk trafiğini artırır.
+## Command-line use
 
-### MVS iş miktarı — asıl maliyet burada
-
-Bellek ayarı çökmeyi önler, süreyi belirlemez. `patch_match_stereo` maliyeti üç şeye bağlı ve ikisi fazla ayarlanmış gelir:
-
-| Kaldıraç | COLMAP varsayılanı | Bizde | Etki |
-|---|---|---|---|
-| Referans görüntü | kaydedilen her kare (300) | **150** (`--mvs-refs`) | doğrusal |
-| Komşu görüntü | 20 | **10** (`--mvs-src-images`) | doğrusal |
-| Çözünürlük | tam | değişmez | ~karesel |
-
-151°'yi 300 kareyle taramak görüntü başına 0.5° demek — yüzey rekonstrüksiyonu için ciddi bir fazlalık. ~1.5° aralık füzyon için fazlasıyla yeterli. Alt örnekleme zamanda düzgün dağıtılır, yoksa yayın bir ucu boş kalır.
-
-**Çözünürlüğe dokunulmaz** — doğruluğun bağlı olduğu tek parametre odur.
-
-Süre beklentisi (T4, 1600 px): referans başına ~20 sn fotometrik, geometrik geçiş bunun ~3 katı. 300 referans ≈ 6–7 saat, 150 referans + 10 komşu ≈ **1.5–2 saat**. Koşu başlarken tahmini yazdırır.
-
-### İlerleme takibi
-
-COLMAP çıktısı log dosyasına gider ama artık **canlı özetlenir**: her adım başlık basar, 30 saniyede bir sayaç + geçen süre + tahmini kalan süre yazar.
-
-```
-[3/6] MVS — yogun yuzey (en uzun adim)
-[mvs] patch_match: 150 referans, onbellek 4 GB — T4'te kabaca 200 dk
-[patch_match] basladi
-  [patch_match] 42/150  %28  gecen 55 dk  kalan ~2.4 sa · 3.9 sn/iter
-```
-
-`patch_match` ilerlemesi log satırlarından değil **diskteki derinlik haritası dosyalarından** sayılır; COLMAP sürümleri ilerleme satırını farklı yazıyor (ya da hiç yazmıyor), dosyalar ise her sürümde aynı yere düşüyor.
-
-## Pipeline durumu
-
-| Adım | Modül | Durum |
-|---|---|---|
-| (a) Kare çıkarma + bulanıklık eleme | `pipeline/frames.py` | hazır (kaynak kare indeksi korunur) |
-| ARKit yakalama okuma (Stray/Record3D) | `pipeline/arkit.py` | hazır |
-| (b) COLMAP SfM | `pipeline/sfm.py` | hazır |
-| (c1) COLMAP MVS + Poisson | `pipeline/mvs.py` | hazır (CUDA gerekir → Colab) |
-| (c2) Gaussian splatting hattı | `pipeline/gsplat.py` | stub |
-| (d) Saç/fon maskeleme | `pipeline/masking.py` | stub |
-| (e) Markersiz ölçek (ARKit poz + LiDAR) | `pipeline/scale.py` | hazır |
-| (f) FLAME kaydı → landmarks.json | `pipeline/flame_fit.py` | stub (FLAME hesabını aç: flame.is.tue.mpg.de) |
-| (g) 6 ölçüm | `pipeline/measure.py` | hazır (landmarks.json bekler) |
-| (h) Renkli GLB export | `pipeline/export.py` | hazır (vertex rengi; UV doku sonra) |
-| Hata raporu | `report/compare.py` | hazır |
-
-Renk bedava gelir: COLMAP `stereo_fusion` her noktaya karelerden okunan RGB'yi yazar, Poisson mesh'e taşır, `export.py` GLB'ye aktarır. Bu **vertex rengi**, UV dokusu değil — çözünürlüğü mesh yoğunluğuyla sınırlı. Ben/kırışıklık gibi ince detay için karelerden doku pişirmek gerekir (WP7); ölçümleri etkilemez.
-
-## Kalite kapıları — kodun reddettiği durumlar
-
-Boşa geçen 40 dakikalık koşuları önlemek için pipeline erken durur:
-
-| Kontrol | Nerede | Eşik |
-|---|---|---|
-| Açısal kapsama | `arkit.py` | <20° → **hata** (paralaks yok, SfM çözemez); <120° → uyarı |
-| VIO sıçraması | `arkit.py` | karelerin %2'sinden fazlasında >15 cm → hata |
-| Odak uzaklığı kayması | `arkit.py` | >%1 → bilgi satırı; kare-başına iç parametreler COLMAP'e verilir (hata değil) |
-| Kare sayısı | `arkit.py` | <120 → hata; <700 → uyarı |
-| SfM kayıt oranı | `sfm.py` | <%50 veya <20 kare → **hata**, MVS'e geçilmez |
-| Ölçek uyumu | `scale.py` | `agreement_pct` >%1.5 → `scale_verified=false` |
-
-Yol uzunluğu bilerek ölçüt **değil**: bir yüzün etrafında 72°'lik kısa bir yay, iki metrelik düz kaydırmadan çok daha fazla bilgi taşır. Belirleyici olan açısal kapsama.
-
-COLMAP birden fazla alt-model üretirse (`sparse/0`, `sparse/1`, …) `sfm.py` **en çok kare kaydedileni** seçer ve bölünmeyi bildirir.
-
-## Ölçek doğrulaması
-
-`scale.json` iki **bağımsız** tahmin ve aralarındaki uyumu yazar:
-
-- `s_pose_m_per_unit` — COLMAP ve ARKit kamera yörüngeleri arasındaki benzerlik ölçeği (ikili mesafe oranlarının medyanı; VIO dönme kaymasına karşı dayanıklı)
-- `s_depth_m_per_unit` — LiDAR derinliği / COLMAP derinliği oranı, yüksek güvenli piksellerde
-- `agreement_pct` — ikisi arasındaki fark. **%1.5 üstü → `scale_verified=false`**, vaka incelenmeden G1 tablosuna girmez.
-
-`ipd_mm` (55–70 mm) ve `bbox_mm` (150–320 mm) yalnızca **makullük kontrolüdür**, ölçeği asla belirlemez.
-
-## Kullanım
+Install Python 3.10 or newer, the package, and a COLMAP binary:
 
 ```bash
-poc process vaka_001_stray/ --out vaka_001
-poc process vaka_001_stray/ --out vaka_001 --until sfm      # erken dur
-poc process vaka_001_stray/ --out vaka_001 --resume         # kesintiden devam
-poc process vaka_001_stray/ --out vaka_001 --mvs-cache-gb 2 # MVS OOM yerse
-poc scale   vaka_001_stray/ --out vaka_001                  # sadece ölçek
-poc measure vaka_001/landmarks.json --out vaka_001/measurements.json
-python -m poc.report.compare calipers.csv vaka_001 vaka_002
+uv venv --python 3.11
+uv pip install -e '.[dev]'
 ```
 
-Colab'da `poc` yerine **`python -m poc.cli`** kullan — kurulan komut betiği her zaman PATH'e girmiyor.
-
-Kumpas değerleri: `data/calipers_template.csv`'yi kopyala, doldur.
-
-### Test modu — düz video (ARKit verisi olmadan)
-
-`poc process` argümanı `.mp4/.mov` ise ölçek adımı atlanır ve yalnızca fotogrametri hattı koşar:
+Inspect a capture without reconstructing it:
 
 ```bash
-poc process test.mov --out test_out --n-frames 150
+poc inspect /path/to/stray_capture --json
 ```
 
-Çıktı `model_unitless.glb` adıyla yazılır ve koşu başında birimsiz olduğunu bildiren bir uyarı basar. **Yalnızca hattın ayakta olduğunu doğrular** — açı ve Goode oranı anlamlı, mm cinsinden uzunluk/genişlik/sapma üretilemez. G1 için `Stray Scanner` kaydı şart.
+Download the official MediaPipe Tasks model once:
 
-### Çekim uygunluk teşhisi
+```bash
+poc download-models --output-dir models
+```
 
-`colab_setup.ipynb` **bölüm 6**: videoyu pipeline'a sokmadan ~2 dakikada ölçer ve `UYGUN` / `RET` der.
+Run through sparse reconstruction locally on macOS:
 
-Eşikler tahminle değil **iki gerçek koşuyla** kalibre edildi:
+```bash
+poc reconstruct /path/to/stray_capture \
+  --output case_001 \
+  --face-landmarker-model models/face_landmarker.task \
+  --no-sift-gpu \
+  --until sfm
+```
 
-| | özellik/kare | kayma hızı | gerçekte olan |
-|---|---|---|---|
-| düz video testi | 522 | 12 px/sn | %2 kayıt — **çöktü** |
-| Stray `4458ba…` | 632 | 170 px/sn | %81 kayıt, 0.99 px hata — **çalıştı** |
+Run the complete pipeline on a CUDA machine:
 
-İkisinde de özellik sayısı benzer; ayırt eden **paralaks**. Bu yüzden karar esasen kayma hızına bakar (>60 iyi, <25 paralaks yok) ve doku eşiği düşük tutulur (<250 → ret). Düşük doku ret sebebi değil, kalite uyarısıdır.
+```bash
+poc reconstruct /path/to/stray_capture \
+  --output case_001 \
+  --face-landmarker-model models/face_landmarker.task \
+  --frame-count 120 \
+  --max-dimension 1400 \
+  --mvs-references 96 \
+  --mvs-source-images 6
+```
 
-Kayma hızı zamana normalize edilir; ham piksel kayması kare aralığına bağlı olduğu için aynı sahne 37 fps ardışık ile 60 fps'te 34 kare atlayarak ölçüldüğünde 20 kat farklı okunur.
+Use `--resume` only with unchanged inputs and parameters. `case.json` stores the capture
+fingerprint, software version, stage parameters, upstream signatures, status, and timing. A stale
+stage is rejected instead of being silently reused.
 
-## İlk başarı kontrolü
+## Live progress and logs
 
-1. `arkit` çıktısı: açısal kapsama >120°, sıçrama yok, LiDAR "var". Odak kayması satırı **sorun değil** — ölçülmüş iç parametreler COLMAP'e veriliyor (bkz. çekim protokolü).
-2. `sfm` karelerin >%50'sini kaydediyor, tek parça (alt-model bölünmesi uyarısı yok).
-3. `scale.json` → `agreement_pct` < 1.5 ve `scale_verified: true`.
-4. `model.glb` renkli, bbox ~200–250 mm; aynı denek 3 kez çekildiğinde ölçek %1 içinde tekrar ediyor.
+Every stage prints timestamped progress to the notebook or terminal. Long subprocesses emit a
+heartbeat every 15 seconds even when COLMAP itself is silent. PatchMatch progress is read from
+completed depth maps, which is more stable across COLMAP releases than parsing its console format.
 
-Ölçülmüş referans (Stray, 43 sn, 151° kapsama, 2.63 m yörünge): SfM **300/300 kare**, 90 bin nokta. Kısa bir kayıtla (11 sn, 75°, 0.77 m) karşılaştırma: %81 kayıt, `agreement_pct` %2.91 → `scale_verified: false`. Kapsama ve yörünge uzunluğu doğrudan ölçek güvenine dönüşüyor.
+Files:
+
+- `run.log`: structured application log;
+- `colmap/colmap.log`: complete raw COLMAP output and commands;
+- `case.json`: stage state, parameters, signatures, and elapsed times.
+
+Use `--verbose` to mirror raw COLMAP lines to the terminal.
+
+## Output layout
+
+```text
+case_001/
+├── case.json
+├── run.log
+├── images/
+├── masks/
+├── reconstruction_images/
+├── colmap/
+├── face_mesh_raw.ply
+├── scale.json
+├── face_model.glb
+├── landmarks.json
+└── measurements.json
+```
+
+The GLB stores geometry in metres, following the glTF convention. Landmark and measurement JSON
+files use millimetres.
+
+## Capture protocol
+
+- Seat the subject with a supported, still head and neutral closed-mouth expression.
+- Ask the subject to look at a fixed mark rather than following the phone with their eyes.
+- Use constant diffuse lighting and a static environment.
+- Keep the main rear camera approximately 60–70 cm from the face.
+- Record one continuous Stray session with two passes:
+  - eye-level ear-to-ear arc;
+  - lower arc tilted upward to expose the nasal base.
+- Do not stop recording between passes; one ARKit session provides one metric coordinate system.
+
+The reference capture is stored sideways without rotation metadata. The default
+`--rotation clockwise` normalizes it to portrait and transforms camera intrinsics consistently.
+
+## Measurement status
+
+Landmarks are detected with MediaPipe Tasks' explicit CPU delegate in multiple registered views,
+robustly triangulated, and snapped to the
+reconstructed surface. Measurement definitions are centralized and explicitly labeled
+`provisional_*_v1`. They are suitable for engineering evaluation only and must be reviewed by a
+surgeon before any clinical study.
+
+No accuracy claim is currently possible because the project has no manual reference measurements
+or repeat captures.
+
+## Development
+
+```bash
+uv run pytest
+uv run ruff check .
+```
+
+See [PLAN.md](PLAN.md) for milestones, gates, known limitations, and the validation sequence.

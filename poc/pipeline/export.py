@@ -1,54 +1,47 @@
-"""Adim (h): olcekli, RENKLI GLB disa aktarimi.
+"""Export a metric, vertex-colored facial mesh as GLB."""
 
-Renk COLMAP'ten bedava gelir: `stereo_fusion` her noktaya karelerden okunan
-RGB'yi yazar (`fused.ply`), Poisson da bunu mesh'e tasir. Burada tek isimiz
-o rengi GLB'ye kadar kaybetmeden goturmek.
-
-Neden trimesh'e dogrudan okutmuyoruz: `trimesh.load(..., process=True)`
-(varsayilan) yakin vertexleri birlestirir ve vertex renkleri sessizce
-bozulabilir/dusebilir. Bu yuzden geometriyi ve renkleri Open3D ile okuyup
-trimesh'e acikca veriyoruz — GLB yazimi yine trimesh'te, cunku Open3D'nin
-GLB destegi zayif.
-
-NOT: bu VERTEX RENGI, doku (UV texture) degil. Cozunurlugu mesh yogunluguyla
-sinirlidir; ben/kirisiklik gibi ince detay icin karelerden UV doku pisirmek
-gerekir — o WP7 isi ve olcumleri etkilemez.
-"""
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-import open3d as o3d
-import trimesh
+
+from poc.logging_utils import get_logger
 
 
-def export_glb(mesh_ply: Path, scale_mm_per_unit: float, out_glb: Path) -> Path:
-    m = o3d.io.read_triangle_mesh(str(mesh_ply))
-    if len(m.vertices) == 0:
-        raise RuntimeError(f"Mesh bos veya okunamadi: {mesh_ply}")
+def export_glb(mesh_path: Path, scale_mm_per_unit: float, output_glb: Path) -> Path:
+    import open3d as o3d
+    import trimesh
 
-    verts = np.asarray(m.vertices, dtype=np.float64) * scale_mm_per_unit
-    faces = np.asarray(m.triangles, dtype=np.int64)
+    source = o3d.io.read_triangle_mesh(str(mesh_path))
+    if not len(source.vertices):
+        raise RuntimeError(f"Mesh is empty or unreadable: {mesh_path}")
 
-    colors = None
-    if m.has_vertex_colors():
-        rgb = np.asarray(m.vertex_colors)
-        rgb = np.clip(rgb * 255.0, 0, 255).astype(np.uint8)
-        alpha = np.full((len(rgb), 1), 255, np.uint8)
-        colors = np.concatenate([rgb, alpha], axis=1)
+    # glTF uses metres by convention. Measurements are converted to millimetres
+    # separately, but the viewer asset should remain interoperable.
+    vertices_m = np.asarray(source.vertices, dtype=np.float64) * (scale_mm_per_unit / 1000.0)
+    faces = np.asarray(source.triangles, dtype=np.int64)
+    vertex_colors = None
+    if source.has_vertex_colors():
+        rgb = np.clip(np.asarray(source.vertex_colors) * 255.0, 0, 255).astype(np.uint8)
+        alpha = np.full((len(rgb), 1), 255, dtype=np.uint8)
+        vertex_colors = np.concatenate([rgb, alpha], axis=1)
 
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces,
-                           vertex_colors=colors, process=False)
-    mesh.export(str(out_glb))
-
-    ext = mesh.bounding_box.extents
-    unit = "mm" if scale_mm_per_unit != 1.0 else "birim (OLCEKSIZ)"
-    print(f"[export] {out_glb}  (bbox {unit}: "
-          f"{ext[0]:.0f} x {ext[1]:.0f} x {ext[2]:.0f})")
-    if colors is None:
-        print("[export] UYARI: mesh'te vertex rengi yok — GLB gri cikacak. "
-              "fused.ply renk tasiyor mu diye bak (stereo_fusion ciktisi).")
-    else:
-        print(f"[export] {len(colors)} vertex rengi tasindi (RGBA)")
-    return out_glb
+    mesh = trimesh.Trimesh(
+        vertices=vertices_m,
+        faces=faces,
+        vertex_colors=vertex_colors,
+        process=False,
+    )
+    output_glb.parent.mkdir(parents=True, exist_ok=True)
+    mesh.export(str(output_glb))
+    extents_mm = mesh.bounding_box.extents * 1000.0
+    get_logger().info(
+        "GLB export complete | %s | bounding box %.1f × %.1f × %.1f mm | %s",
+        output_glb,
+        extents_mm[0],
+        extents_mm[1],
+        extents_mm[2],
+        "vertex color" if vertex_colors is not None else "geometry only",
+    )
+    return output_glb

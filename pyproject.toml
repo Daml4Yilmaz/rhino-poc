@@ -4,21 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhino-poc"
-version = "0.9.1"
-description = "Telefon videosundan gercek olcekli 3D yuz modeli + 6 rinoplasti olcumu (PoC)"
+version = "1.0.0"
+description = "Metric facial surface reconstruction and rhinoplasty measurements from iPhone capture data"
 requires-python = ">=3.10"
 dependencies = [
-    "typer>=0.9",
-    "numpy",
-    # ArUco birakildigi icin contrib GEREKMIYOR. Colab'da hazir gelen
-    # opencv-python-headless ile contrib yan yana kurulunca cv2 namespace'i
-    # yarim yukleniyor (SIFT_create calisirken CascadeClassifier kayboluyor).
-    "opencv-python",
-    "open3d",
-    "trimesh",
-    "pycolmap",                # COLMAP modelini okumak icin (binary ayrica kurulur)
-    "pandas",
-    "pillow",
+    "typer>=0.12,<1",
+    "numpy>=1.26,<3",
+    "opencv-contrib-python>=4.9,<5",
+    "open3d>=0.18,<1",
+    "trimesh>=4,<5",
+    "pycolmap>=3.10,<4.2",
+    "pandas>=2,<3",
+    "pillow>=10,<12",
+    "mediapipe==0.10.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
 ]
 
 [project.scripts]
@@ -26,3 +30,11 @@ poc = "poc.cli:app"
 
 [tool.setuptools.packages.find]
 include = ["poc*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

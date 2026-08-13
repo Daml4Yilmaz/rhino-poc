@@ -1,41 +1,80 @@
-"""Pipeline parametreleri — tek yerden ayarlanir."""
+"""Typed reconstruction configuration and case-directory layout."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
-@dataclass
-class Config:
-    # Kare secimi (fotogrametrinin girdisi)
-    n_frames: int = 300            # iki gecis boyunca secilecek keskin kare
-    blur_min_var: float = 40.0     # Laplacian varyans alt esigi (mutlak ret)
-    max_dim: int | None = 1600     # COLMAP'e verilen karenin uzun kenari
-
-    # Markersiz olcek (ARKit poz + LiDAR; bkz. pipeline/scale.py)
-    scale_agreement_pct: float = 1.5   # poz/LiDAR ayrisma esigi
-    depth_conf_min: int = 2            # LiDAR guven haritasi: 2 = yuksek
-
-    # COLMAP
-    colmap_bin: str = "colmap"
-    camera_model: str = "OPENCV"
-    seq_overlap: int = 20          # video karesi -> sirali eslestirme penceresi
-    use_gpu: bool = True
-
-    # MVS bellek: COLMAP varsayilani 32 GB'lik onbellek ister ve paylasimli
-    # ortamlarda (Colab ~12.7 GB) surec SIGKILL yer. None -> RAM'e gore otomatik.
+@dataclass(frozen=True)
+class ReconstructionConfig:
+    output_dir: Path
+    frame_count: int = 120
+    minimum_sharpness: float = 35.0
+    frame_max_dimension: int = 1400
+    rotation: str = "clockwise"
+    sequential_overlap: int = 10
+    mvs_reference_count: int = 96
+    mvs_source_images: int = 6
+    mvs_geometric_consistency: bool = False
     mvs_cache_gb: int | None = None
+    mvs_max_image_size: int | None = None
+    poisson_depth: int = 9
+    scale_agreement_percent: float = 2.0
+    colmap_binary: str = "colmap"
 
-    # Poisson mesh
-    poisson_depth: int = 10
-    poisson_trim: float = 7.0      # dusuk yogunluklu vertexleri kirp
+    @property
+    def manifest_path(self) -> Path:
+        return self.output_dir / "case.json"
 
-    # Cikti
-    out_dir: Path = field(default_factory=lambda: Path("vaka_out"))
+    @property
+    def log_path(self) -> Path:
+        return self.output_dir / "run.log"
 
-    def frames_dir(self) -> Path: return self.out_dir / "frames"
-    def frames_index(self) -> Path: return self.out_dir / "frames_index.json"
-    def masks_dir(self) -> Path: return self.out_dir / "masks"
-    def colmap_dir(self) -> Path: return self.out_dir / "colmap"
-    def sparse_dir(self) -> Path: return self.colmap_dir() / "sparse"
-    def dense_dir(self) -> Path: return self.colmap_dir() / "dense"
+    @property
+    def images_dir(self) -> Path:
+        return self.output_dir / "images"
+
+    @property
+    def frame_index_path(self) -> Path:
+        return self.output_dir / "frames.json"
+
+    @property
+    def masks_dir(self) -> Path:
+        return self.output_dir / "masks"
+
+    @property
+    def reconstruction_images_dir(self) -> Path:
+        return self.output_dir / "reconstruction_images"
+
+    @property
+    def colmap_dir(self) -> Path:
+        return self.output_dir / "colmap"
+
+    @property
+    def sparse_dir(self) -> Path:
+        return self.colmap_dir / "sparse"
+
+    @property
+    def dense_dir(self) -> Path:
+        return self.colmap_dir / "dense"
+
+    @property
+    def raw_mesh_path(self) -> Path:
+        return self.output_dir / "face_mesh_raw.ply"
+
+    @property
+    def scale_path(self) -> Path:
+        return self.output_dir / "scale.json"
+
+    @property
+    def glb_path(self) -> Path:
+        return self.output_dir / "face_model.glb"
+
+    @property
+    def landmarks_path(self) -> Path:
+        return self.output_dir / "landmarks.json"
+
+    @property
+    def measurements_path(self) -> Path:
+        return self.output_dir / "measurements.json"

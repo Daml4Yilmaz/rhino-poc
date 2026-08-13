@@ -1,7 +1,7 @@
 case_id,measurement,true_value
-vaka_001,nasofrontal_angle_deg,
-vaka_001,nasolabial_angle_deg,
-vaka_001,goode_ratio,
-vaka_001,nose_length_mm,
-vaka_001,nose_width_mm,
-vaka_001,midline_deviation_mm,
+case_001,nasofrontal_angle_deg,
+case_001,nasolabial_angle_deg,
+case_001,goode_ratio,
+case_001,nose_length_mm,
+case_001,nose_width_mm,
+case_001,midline_deviation_mm,

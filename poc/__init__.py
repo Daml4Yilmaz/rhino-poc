@@ -1,1 +1,3 @@
-__version__ = "0.9.1"
+"""Metric facial reconstruction proof of concept."""
+
+__version__ = "1.0.0"

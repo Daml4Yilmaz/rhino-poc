@@ -1,22 +1,5 @@
-"""Adim (g): 6 rinoplasti olcumu.
+"""Compute six provisional standard rhinoplasty surface measurements."""
 
-Girdi: mm cinsinden 3D landmark sozlugu (hafta 2'de FLAME kaydindan sabit
-vertex indeksleriyle uretilecek; simdilik landmarks.json elle/harici de
-verilebilir).
-
-Beklenen landmark isimleri (hepsi [x,y,z] mm):
-  g    : glabella
-  n    : nasion (sellion)
-  prn  : pronasale (burun ucu)
-  sn   : subnasale
-  cm   : columella orta noktasi
-  ls   : labiale superius
-  al_l : sol alare (burun kanadi en dis nokta)
-  al_r : sag alare
-  ac   : alar crease (alar-fasiyal oluk, orta)
-  en_l : sol endocanthion (ic goz pinari)
-  en_r : sag endocanthion
-"""
 from __future__ import annotations
 
 import json
@@ -24,45 +7,76 @@ from pathlib import Path
 
 import numpy as np
 
-REQUIRED = ["g", "n", "prn", "sn", "cm", "ls", "al_l", "al_r", "ac", "en_l", "en_r"]
+from poc.logging_utils import get_logger
+
+REQUIRED_LANDMARKS = {
+    "glabella",
+    "nasion",
+    "pronasale",
+    "subnasale",
+    "columella",
+    "labiale_superius",
+    "left_alare",
+    "right_alare",
+    "left_endocanthion",
+    "right_endocanthion",
+}
 
 
-def _angle(a: np.ndarray, vertex: np.ndarray, b: np.ndarray) -> float:
-    v1, v2 = a - vertex, b - vertex
-    cosang = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-    return float(np.degrees(np.arccos(np.clip(cosang, -1.0, 1.0))))
+def _angle(first: np.ndarray, vertex: np.ndarray, third: np.ndarray) -> float:
+    first_vector = first - vertex
+    second_vector = third - vertex
+    denominator = np.linalg.norm(first_vector) * np.linalg.norm(second_vector)
+    if denominator < 1e-9:
+        raise ValueError("Cannot calculate an angle from coincident landmarks")
+    cosine = np.dot(first_vector, second_vector) / denominator
+    return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
-def compute_measurements(landmarks: dict[str, list[float]]) -> dict:
-    missing = [k for k in REQUIRED if k not in landmarks]
+def compute_measurements(landmarks: dict[str, list[float]]) -> dict[str, float]:
+    missing = sorted(REQUIRED_LANDMARKS - landmarks.keys())
     if missing:
-        raise ValueError(f"Eksik landmark(lar): {missing}")
-    L = {k: np.asarray(v, dtype=np.float64) for k, v in landmarks.items()}
+        raise ValueError(f"Missing required landmarks: {missing}")
+    points = {name: np.asarray(value, dtype=np.float64) for name, value in landmarks.items()}
 
-    nose_length = float(np.linalg.norm(L["n"] - L["prn"]))
-    projection = float(np.linalg.norm(L["ac"] - L["prn"]))
-
-    # Orta hat duzlemi: endocanthion orta noktasi + normal = en_r - en_l
-    mid = (L["en_l"] + L["en_r"]) / 2.0
-    normal = L["en_r"] - L["en_l"]
-    normal /= np.linalg.norm(normal)
-    midline_dev = float(abs(np.dot(L["prn"] - mid, normal)))
+    eye_axis = points["right_endocanthion"] - points["left_endocanthion"]
+    eye_axis /= np.linalg.norm(eye_axis)
+    eye_midpoint = (points["left_endocanthion"] + points["right_endocanthion"]) / 2.0
+    nasal_length = float(np.linalg.norm(points["pronasale"] - points["nasion"]))
+    alar_midpoint = (points["left_alare"] + points["right_alare"]) / 2.0
+    tip_projection = float(np.linalg.norm(points["pronasale"] - alar_midpoint))
+    midline_deviation = float(abs(np.dot(points["pronasale"] - eye_midpoint, eye_axis)))
 
     return {
-        "nasofrontal_angle_deg": round(_angle(L["g"], L["n"], L["prn"]), 1),
-        "nasolabial_angle_deg": round(_angle(L["cm"], L["sn"], L["ls"]), 1),
-        "goode_ratio": round(projection / nose_length, 3),
-        "nose_length_mm": round(nose_length, 2),
-        "nose_width_mm": round(float(np.linalg.norm(L["al_l"] - L["al_r"])), 2),
-        "midline_deviation_mm": round(midline_dev, 2),
+        "nasofrontal_angle_deg": round(
+            _angle(points["glabella"], points["nasion"], points["pronasale"]), 1
+        ),
+        "nasolabial_angle_deg": round(
+            _angle(points["columella"], points["subnasale"], points["labiale_superius"]),
+            1,
+        ),
+        "goode_ratio": round(tip_projection / nasal_length, 3),
+        "nose_length_mm": round(nasal_length, 2),
+        "nose_width_mm": round(
+            float(np.linalg.norm(points["left_alare"] - points["right_alare"])), 2
+        ),
+        "midline_deviation_mm": round(midline_deviation, 2),
     }
 
 
-def run_measure(landmarks_json: Path, out_json: Path) -> dict:
-    landmarks = json.loads(landmarks_json.read_text())
-    m = compute_measurements(landmarks)
-    out_json.write_text(json.dumps(m, indent=2))
-    print(f"[measure] {out_json}:")
-    for k, v in m.items():
-        print(f"  {k}: {v}")
-    return m
+def run_measurements(landmarks_json: Path, output_json: Path) -> dict[str, float]:
+    document = json.loads(landmarks_json.read_text(encoding="utf-8"))
+    landmarks = document.get("landmarks", document)
+    measurements = compute_measurements(landmarks)
+    result = {
+        "schema_version": 1,
+        "definition": "provisional_surface_rhinoplasty_measurements_v1",
+        "warning": "Definitions require surgeon review before clinical use.",
+        "measurements": measurements,
+    }
+    output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    get_logger().info(
+        "Measurement calculation complete | %s",
+        " | ".join(f"{name}={value}" for name, value in measurements.items()),
+    )
+    return measurements
