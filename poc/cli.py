@@ -99,6 +99,7 @@ def process(
     if resume and cfg.frames_index().exists():
         print(f"[frames] atlandi (resume): {cfg.frames_dir()} mevcut")
     else:
+        _step(1, "KARE SECIMI")
         from .pipeline.frames import select_frames
         select_frames(video, cfg.frames_dir(), cfg.n_frames,
                       cfg.blur_min_var, cfg.max_dim, cfg.frames_index())
@@ -110,6 +111,7 @@ def process(
     if resume and (model / "cameras.bin").exists():
         print(f"[sfm] atlandi (resume): {model} mevcut")
     else:
+        _step(2, "SfM — fotogrametri (birimsiz)")
         from .pipeline.sfm import run_sfm
         fmap = None
         if cap is not None and cfg.frames_index().exists():
@@ -125,6 +127,7 @@ def process(
     if resume and mesh_raw.exists():
         print(f"[mvs] atlandi (resume): {mesh_raw} mevcut")
     else:
+        _step(3, "MVS — yogun yuzey (en uzun adim)")
         from .pipeline.mvs import run_mvs
         mesh_raw = run_mvs(cfg.frames_dir(), model, cfg.dense_dir(),
                            cfg.colmap_bin, cfg.poisson_depth, cfg.poisson_trim,
@@ -144,6 +147,7 @@ def process(
         scale = json.loads(scale_json.read_text())["scale_mm_per_unit"]
         print(f"[scale] atlandi (resume): {scale:.6f} mm/birim")
     else:
+        _step(4, "OLCEK — ARKit poz + LiDAR")
         from .pipeline.scale import compute_scale
         masks = cfg.masks_dir() if cfg.masks_dir().is_dir() else None
         scale = compute_scale(out, model, capture, scale_json, masks,
@@ -152,6 +156,7 @@ def process(
         return _done(t0)
 
     # 5. export — test modunda birimsiz oldugunu dosya adindan belli et
+    _step(5, "EXPORT — renkli GLB")
     from .pipeline.export import export_glb
     glb = out / ("model_unitless.glb" if test_mode else "model.glb")
     export_glb(mesh_raw, scale, glb)
@@ -167,6 +172,10 @@ def process(
         print("[measure] landmarks.json yok — atlandi "
               "(hafta 2: FLAME kaydi uretecek).")
     _done(t0)
+
+
+def _step(n: int, name: str) -> None:
+    print(f"\n{'='*62}\n[{n}/6] {name}\n{'='*62}", flush=True)
 
 
 def _done(t0: float) -> None:

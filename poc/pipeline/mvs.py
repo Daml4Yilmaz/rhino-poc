@@ -8,11 +8,12 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 
 import numpy as np
 import open3d as o3d
+
+from ._proc import run_logged
 
 
 def _auto_cache_gb() -> int:
@@ -79,13 +80,6 @@ def _tune_patchmatch(cfg: Path, src_images: int, max_refs: int) -> int:
     return len(blocks)
 
 
-def _run(cmd: list[str], log_file: Path) -> None:
-    with open(log_file, "a") as f:
-        f.write("\n$ " + " ".join(cmd) + "\n")
-        f.flush()
-        subprocess.run(cmd, check=True, stdout=f, stderr=subprocess.STDOUT)
-
-
 def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             colmap_bin: str = "colmap", poisson_depth: int = 10,
             poisson_trim: float = 7.0, cache_size_gb: int | None = None,
@@ -115,11 +109,11 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             print(f"[mvs] yarim undistort temizleniyor ({n_have}/{n_expected} "
                   "goruntu) — derinlik haritalari korunuyor")
             shutil.rmtree(images_dst)
-        _run([colmap_bin, "image_undistorter",
-              "--image_path", str(frames_dir),
-              "--input_path", str(sparse_model),
-              "--output_path", str(dense_dir),
-              "--output_type", "COLMAP"], log)
+        run_logged([colmap_bin, "image_undistorter",
+                    "--image_path", str(frames_dir),
+                    "--input_path", str(sparse_model),
+                    "--output_path", str(dense_dir),
+                    "--output_type", "COLMAP"], log, "undistort")
 
     n_ref = _tune_patchmatch(dense_dir / "stereo" / "patch-match.cfg",
                              src_images, max_refs)
@@ -142,7 +136,9 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     print(f"[mvs] patch_match: {n_ref} referans, onbellek {cache_gb} GB "
           f"— T4'te kabaca {est:.0f} dk (hazir derinlik haritalari atlanir)"
           + ("" if geom_consistency else "  [geometrik gecis KAPALI]"))
-    _run(cmd, log)
+    suf = ".geometric.bin" if geom_consistency else ".photometric.bin"
+    run_logged(cmd, log, "patch_match",
+               watch=(dense_dir / "stereo" / "depth_maps", suf, n_ref))
 
     # stereo_fusion da ayni tuzagi tasir, hatta daha kotusu: use_cache
     # VARSAYILANI 0'dir, yani butun derinlik/normal haritalarini bellege
@@ -151,15 +147,23 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     # geom kapaliysa fuzyon FOTOMETRIK haritalari okumali; varsayilani
     # "geometric" oldugu icin aksi halde var olmayan dosyalari arar.
     fused = dense_dir / "fused.ply"
-    _run([colmap_bin, "stereo_fusion",
-          "--workspace_path", str(dense_dir),
-          "--output_path", str(fused),
-          "--input_type", "geometric" if geom_consistency else "photometric",
-          "--StereoFusion.use_cache", "1",
-          "--StereoFusion.cache_size", str(cache_gb)], log)
+    run_logged([colmap_bin, "stereo_fusion",
+                "--workspace_path", str(dense_dir),
+                "--output_path", str(fused),
+                "--input_type",
+                "geometric" if geom_consistency else "photometric",
+                "--StereoFusion.use_cache", "1",
+                "--StereoFusion.cache_size", str(cache_gb)], log, "fusion")
 
-    # Poisson: Open3D ile (yogunluk dusuk vertexleri kirparak)
+    # Poisson: Open3D ile (yogunluk dusuk vertexleri kirparak).
+    # Tek uzun cagri, ara ilerleme vermez — en azindan giris boyutunu ve
+    # sureyi bildir ki takilmis mi anlasilsin.
+    import time as _t
+    _t0 = _t.time()
+    print("[poisson] fused.ply okunuyor…", flush=True)
     pcd = o3d.io.read_point_cloud(str(fused))
+    print(f"[poisson] {len(pcd.points)} nokta -> yuzey cikariliyor "
+          f"(depth={poisson_depth}, birkac dakika surebilir)", flush=True)
     # fused.ply karelerden okunan RGB'yi tasir; Poisson bunu mesh'e aktarir.
     # Renk buradan kaybolursa GLB gri cikar — erken haber ver.
     if not pcd.has_colors():
@@ -173,6 +177,7 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     mesh.remove_degenerate_triangles()
     mesh.remove_unreferenced_vertices()
 
+    print(f"[poisson] bitti — {_t.time()-_t0:.0f} sn", flush=True)
     out = dense_dir.parent.parent / "mesh_raw.ply"
     o3d.io.write_triangle_mesh(str(out), mesh)
     print(f"[mvs] mesh: {len(mesh.vertices)} vertex, "

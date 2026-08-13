@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ._proc import run_logged
+
 PINHOLE = 1   # COLMAP kamera modeli: params = [fx, fy, cx, cy]
 
 
@@ -115,13 +117,6 @@ def _gpu_opts(colmap_bin: str) -> tuple[str, str]:
     return opts
 
 
-def _run(cmd: list[str], log_file: Path) -> None:
-    with open(log_file, "a") as f:
-        f.write("\n$ " + " ".join(cmd) + "\n")
-        f.flush()
-        subprocess.run(cmd, check=True, stdout=f, stderr=subprocess.STDOUT)
-
-
 def run_sfm(frames_dir: Path, colmap_dir: Path, colmap_bin: str = "colmap",
             camera_model: str = "OPENCV", seq_overlap: int = 15,
             use_gpu: bool = True, matcher: str = "sequential",
@@ -143,15 +138,15 @@ def run_sfm(frames_dir: Path, colmap_dir: Path, colmap_bin: str = "colmap",
     use_arkit_K = (capture is not None and frame_of_image
                    and getattr(capture, "intrinsics", None) is not None)
 
-    _run([colmap_bin, "feature_extractor",
-          "--database_path", str(db),
-          "--image_path", str(frames_dir),
-          # ARKit ic parametreleri gelecekse tek-kamera varsaymanin anlami yok:
-          # her goruntu kendi olculmus kamerasini alacak.
-          "--ImageReader.single_camera", "0" if use_arkit_K else "1",
-          "--ImageReader.camera_model",
-          "PINHOLE" if use_arkit_K else camera_model,
-          ext_gpu, gpu], log)
+    run_logged([colmap_bin, "feature_extractor",
+                "--database_path", str(db),
+                "--image_path", str(frames_dir),
+                # ARKit ic parametreleri gelecekse tek-kamera varsaymanin
+                # anlami yok: her goruntu kendi olculmus kamerasini alacak.
+                "--ImageReader.single_camera", "0" if use_arkit_K else "1",
+                "--ImageReader.camera_model",
+                "PINHOLE" if use_arkit_K else camera_model,
+                ext_gpu, gpu], log, "oznitelik")
 
     if use_arkit_K:
         write_arkit_intrinsics(db, frames_dir, capture, frame_of_image)
@@ -160,15 +155,15 @@ def run_sfm(frames_dir: Path, colmap_dir: Path, colmap_bin: str = "colmap",
         # Birlestirilmis (concat) videolar icin: klip sinirindaki siçrama
         # sequential eslestirmeyi bolebilir; exhaustive herkesle eslestirir.
         # ~200 karede T4'te ~10-20 dk.
-        _run([colmap_bin, "exhaustive_matcher",
-              "--database_path", str(db),
-              match_gpu, gpu], log)
+        run_logged([colmap_bin, "exhaustive_matcher",
+                    "--database_path", str(db),
+                    match_gpu, gpu], log, "eslestirme")
     else:
-        _run([colmap_bin, "sequential_matcher",
+        run_logged([colmap_bin, "sequential_matcher",
               "--database_path", str(db),
-              "--SequentialMatching.overlap", str(seq_overlap),
-              "--SequentialMatching.loop_detection", "0",
-              match_gpu, gpu], log)
+                    "--SequentialMatching.overlap", str(seq_overlap),
+                    "--SequentialMatching.loop_detection", "0",
+                    match_gpu, gpu], log, "eslestirme")
 
     mapper = [colmap_bin, "mapper",
               "--database_path", str(db),
@@ -180,7 +175,7 @@ def run_sfm(frames_dir: Path, colmap_dir: Path, colmap_bin: str = "colmap",
         mapper += ["--Mapper.ba_refine_focal_length", "0",
                    "--Mapper.ba_refine_principal_point", "0",
                    "--Mapper.ba_refine_extra_params", "0"]
-    _run(mapper, log)
+    run_logged(mapper, log, "mapper")
 
     import pycolmap
 

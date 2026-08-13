@@ -20,22 +20,28 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ._proc import Ticker
+
 
 def _decode_scores(video: Path) -> np.ndarray:
     """Her karenin keskinlik skoru (Laplacian varyansi). Tek gecis."""
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
         raise RuntimeError(f"Video acilamadi: {video}")
+    n_tot = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+    tick = Ticker("kare cozme", n_tot)
     scores = []
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+        tick.step(len(scores))
         g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # Skoru kucuk kopyada olc: sonuc siralamasi ayni, cozme suresi degil.
         g = cv2.resize(g, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
         scores.append(float(cv2.Laplacian(g, cv2.CV_64F).var()))
     cap.release()
+    tick.done()
     if not scores:
         raise RuntimeError(f"Video'dan hic kare okunamadi: {video}")
     return np.asarray(scores)
@@ -62,6 +68,7 @@ def _write(video: Path, frames_dir: Path, wanted: list[int],
     frames_dir.mkdir(parents=True, exist_ok=True)
     want = set(wanted)
     cap = cv2.VideoCapture(str(video))
+    tick = Ticker("kare yazma", len(wanted))
     names: list[str] = []
     i = 0
     while True:
@@ -79,8 +86,10 @@ def _write(video: Path, frames_dir: Path, wanted: list[int],
             cv2.imwrite(str(frames_dir / name), frame,
                         [int(cv2.IMWRITE_JPEG_QUALITY), 95])
             names.append(name)
+            tick.step(len(names))
         i += 1
     cap.release()
+    tick.done()
     return names
 
 

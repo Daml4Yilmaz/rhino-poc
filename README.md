@@ -96,6 +96,19 @@ Bellek ayarı çökmeyi önler, süreyi belirlemez. `patch_match_stereo` maliyet
 
 Süre beklentisi (T4, 1600 px): referans başına ~20 sn fotometrik, geometrik geçiş bunun ~3 katı. 300 referans ≈ 6–7 saat, 150 referans + 10 komşu ≈ **1.5–2 saat**. Koşu başlarken tahmini yazdırır.
 
+### İlerleme takibi
+
+COLMAP çıktısı log dosyasına gider ama artık **canlı özetlenir**: her adım başlık basar, 30 saniyede bir sayaç + geçen süre + tahmini kalan süre yazar.
+
+```
+[3/6] MVS — yogun yuzey (en uzun adim)
+[mvs] patch_match: 150 referans, onbellek 4 GB — T4'te kabaca 200 dk
+[patch_match] basladi
+  [patch_match] 42/150  %28  gecen 55 dk  kalan ~2.4 sa · 3.9 sn/iter
+```
+
+`patch_match` ilerlemesi log satırlarından değil **diskteki derinlik haritası dosyalarından** sayılır; COLMAP sürümleri ilerleme satırını farklı yazıyor (ya da hiç yazmıyor), dosyalar ise her sürümde aynı yere düşüyor.
+
 ## Pipeline durumu
 
 | Adım | Modül | Durum |
