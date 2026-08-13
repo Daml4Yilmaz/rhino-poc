@@ -33,7 +33,7 @@ Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
   - 1920×1440 yeterli mi? 65 cm'den yüz kısa kenarın ~%60'ını kaplar → **~4 piksel/mm**. 2 mm hedefi için fazlasıyla yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
 
 **Geçiş 1 — göz hizası, kulaktan kulağa**
-- [ ] Sağ kulaktan sol kulağa (ya da tersi — `case.json`'a yazılır), 180°
+- [ ] Sağ kulaktan sol kulağa (ya da tersi — hangisi olduğunu kendin not al; `case.json` manifesti henüz yazılmadı), 180°
 - [ ] Kamera deneğin **göz hizasında**, lens buruna dönük
 - [ ] Mesafe **60–70 cm**, sabit
 - [ ] **25–35 sn**, topuk-parmak yürüyüş, iki el telefonda, dirsekler gövdeye dayalı
@@ -64,6 +64,22 @@ Not: macOS'ta COLMAP CUDA'sız derlenir — beklenen. `mvs` adımı yerelde koş
 
 Gerekçe: sadece COLMAP `patch_match_stereo` ve gaussian splatting CUDA ister. Geri kalan her şey M4 Pro'da koşar; Colab'ın ücretsiz kotası bir kez oturum ortasında tükendiği için Colab'a tek adım devredilir. Ayrıntı: `PLAN.md` §4.
 
+**Kurulum sürümü doğrulanır.** `pip install` aynı sürümü "already satisfied" deyip atlayabildiği için notebook `poc.__version__` yazdırıp asgari sürümü kontrol eder. Eski sürüm görürsen 1. hücreyi (git reset) ve pip hücresini tekrar koş; hâlâ eskiyse `Runtime > Restart session`. Bu kontrol olmadan eskimiş kod sessizce koşar ve düzeltilmiş bir hata düzeltilmemiş gibi görünür.
+
+**Colab akışı 4B'de üçe bölünür:** yolları tanımla → `--until sfm` + sparse modeli Drive'a yedekle → MVS. `/content` geçici olduğu için, bağlantı MVS sırasında koparsa tamamlanmış SfM'i kaybetmemek gerekir. Hepsinde `--resume` var; temiz vakada etkisiz, yarım kalanda tamamlananları atlar.
+
+### MVS bellek ayarı
+
+COLMAP'in bellek varsayılanları paylaşımlı ortamlar için fazla cömert ve aşıldığında süreç **`SIGKILL`** ile ölür — hata mesajı yok, sadece sinyal:
+
+| Ayar | COLMAP varsayılanı | Bizde |
+|---|---|---|
+| `PatchMatchStereo.cache_size` | 32 GB | RAM'in %30'u, 2–8 GB arası |
+| `StereoFusion.cache_size` | 32 GB | aynı değer |
+| `StereoFusion.use_cache` | **0** (her şeyi belleğe alır) | 1 |
+
+Colab (~12.7 GB RAM) için bu ~3–4 GB'a denk gelir. Önbellek boyutu **kaliteyi etkilemez**, yalnızca disk trafiğini artırır. Yine de `SIGKILL` alırsan `--mvs-cache-gb 2` ile kıs; o da yetmezse görüntü boyutunu düşür (`--max-dim 1200`, **yeni bir `OUT` ile** — kare boyutu değişince eski `dense/` kullanılamaz).
+
 ## Pipeline durumu
 
 | Adım | Modül | Durum |
@@ -90,7 +106,7 @@ Boşa geçen 40 dakikalık koşuları önlemek için pipeline erken durur:
 |---|---|---|
 | Açısal kapsama | `arkit.py` | <20° → **hata** (paralaks yok, SfM çözemez); <120° → uyarı |
 | VIO sıçraması | `arkit.py` | karelerin %2'sinden fazlasında >15 cm → hata |
-| Odak uzaklığı kayması | `arkit.py` | >%1 → uyarı (**AE/AF kilitlenmemiş**) |
+| Odak uzaklığı kayması | `arkit.py` | >%1 → bilgi satırı; kare-başına iç parametreler COLMAP'e verilir (hata değil) |
 | Kare sayısı | `arkit.py` | <120 → hata; <700 → uyarı |
 | SfM kayıt oranı | `sfm.py` | <%50 veya <20 kare → **hata**, MVS'e geçilmez |
 | Ölçek uyumu | `scale.py` | `agreement_pct` >%1.5 → `scale_verified=false` |
@@ -115,6 +131,7 @@ COLMAP birden fazla alt-model üretirse (`sparse/0`, `sparse/1`, …) `sfm.py` *
 poc process vaka_001_stray/ --out vaka_001
 poc process vaka_001_stray/ --out vaka_001 --until sfm      # erken dur
 poc process vaka_001_stray/ --out vaka_001 --resume         # kesintiden devam
+poc process vaka_001_stray/ --out vaka_001 --mvs-cache-gb 2 # MVS OOM yerse
 poc scale   vaka_001_stray/ --out vaka_001                  # sadece ölçek
 poc measure vaka_001/landmarks.json --out vaka_001/measurements.json
 python -m poc.report.compare calipers.csv vaka_001 vaka_002
@@ -136,13 +153,24 @@ poc process test.mov --out test_out --n-frames 150
 
 ### Çekim uygunluk teşhisi
 
-`colab_setup.ipynb` **bölüm 6**: videoyu pipeline'a sokmadan ~2 dakikada ölçer ve `UYGUN` / `RET` der. Ölçtüğü üç şey: kare başına SIFT özelliği (>1500 iyi), ardışık kareler arası iç-eşleşme (>50 iyi), ve **kayma hızı px/sn** (>60 iyi, <25 paralaks yok).
+`colab_setup.ipynb` **bölüm 6**: videoyu pipeline'a sokmadan ~2 dakikada ölçer ve `UYGUN` / `RET` der.
+
+Eşikler tahminle değil **iki gerçek koşuyla** kalibre edildi:
+
+| | özellik/kare | kayma hızı | gerçekte olan |
+|---|---|---|---|
+| düz video testi | 522 | 12 px/sn | %2 kayıt — **çöktü** |
+| Stray `4458ba…` | 632 | 170 px/sn | %81 kayıt, 0.99 px hata — **çalıştı** |
+
+İkisinde de özellik sayısı benzer; ayırt eden **paralaks**. Bu yüzden karar esasen kayma hızına bakar (>60 iyi, <25 paralaks yok) ve doku eşiği düşük tutulur (<250 → ret). Düşük doku ret sebebi değil, kalite uyarısıdır.
 
 Kayma hızı zamana normalize edilir; ham piksel kayması kare aralığına bağlı olduğu için aynı sahne 37 fps ardışık ile 60 fps'te 34 kare atlayarak ölçüldüğünde 20 kat farklı okunur.
 
 ## İlk başarı kontrolü
 
-1. `arkit` çıktısı: açısal kapsama >120°, sıçrama yok, LiDAR "var", odak kayması uyarısı **yok**.
+1. `arkit` çıktısı: açısal kapsama >120°, sıçrama yok, LiDAR "var". Odak kayması satırı **sorun değil** — ölçülmüş iç parametreler COLMAP'e veriliyor (bkz. çekim protokolü).
 2. `sfm` karelerin >%50'sini kaydediyor, tek parça (alt-model bölünmesi uyarısı yok).
 3. `scale.json` → `agreement_pct` < 1.5 ve `scale_verified: true`.
 4. `model.glb` renkli, bbox ~200–250 mm; aynı denek 3 kez çekildiğinde ölçek %1 içinde tekrar ediyor.
+
+Ölçülmüş referans (Stray, 43 sn, 151° kapsama, 2.63 m yörünge): SfM **300/300 kare**, 90 bin nokta. Kısa bir kayıtla (11 sn, 75°, 0.77 m) karşılaştırma: %81 kayıt, `agreement_pct` %2.91 → `scale_verified: false`. Kapsama ve yörünge uzunluğu doğrudan ölçek güvenine dönüşüyor.
