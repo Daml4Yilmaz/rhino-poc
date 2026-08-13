@@ -17,17 +17,16 @@ import subprocess
 import time
 from pathlib import Path
 
-# COLMAP'in farkli asamalari ilerlemeyi farkli bicimlerde yazar.
-_PATTERNS: list[re.Pattern] = [
-    re.compile(r"Processing view (\d+) / (\d+)"),
-    re.compile(r"Undistorting image \[(\d+)/(\d+)\]"),
-    re.compile(r"Fusing image \[(\d+)/(\d+)\]"),
-    re.compile(r"Processed file \[(\d+)/(\d+)\]"),
-    re.compile(r"Matching block \[(\d+)/(\d+)"),
-]
+# COLMAP asamalari ilerlemeyi FAZ FAZ yazar ve fazlar arasinda sayac
+# sifirlanir. Fiil de yakalanir: "Indexing 40/300" ile "Fusing 40/300" ayni
+# sey degildir ve tek bir sayac gibi gosterilirse kalan sure yaniltir.
+_PHASE = re.compile(
+    r"(Fusing|Indexing|Integrating|Undistorting|Processing) "
+    r"(?:image|view|file)s?\s*\[?\(?\s*(\d+)\s*/\s*(\d+)\s*[\]\)]?")
+_PROCESSED = re.compile(r"Processed file \[(\d+)/(\d+)\]")
 _REGISTER = re.compile(r"num_reg_frames=(\d+)")
 _MATCHED = re.compile(r"feature_matching\.cc:\d+\] in ")
-_ITER = re.compile(r"(Sweep|Iteration) (\d+): ([\d.]+)s")
+_ITER = re.compile(r"Iteration (\d+): ([\d.]+)s")
 
 
 def _fmt(sec: float) -> str:
@@ -55,6 +54,8 @@ def run_logged(cmd: list[str], log_file: Path, label: str,
     last = 0.0
     cur = tot = 0
     n_reg = 0
+    phase = ""
+    phase_t0 = t0
     iter_times: list[float] = []
     print(f"[{label}] basladi", flush=True)
 
@@ -67,46 +68,56 @@ def run_logged(cmd: list[str], log_file: Path, label: str,
         for line in p.stdout:
             lf.write(line)
 
-            for pat in _PATTERNS:
-                m = pat.search(line)
-                if m:
-                    cur, tot = int(m.group(1)), int(m.group(2))
-                    break
+            new_phase = False
+            m = _PHASE.search(line) or _PROCESSED.search(line)
+            if m:
+                if m.re is _PHASE:
+                    ph, cur, tot = m.group(1), int(m.group(2)), int(m.group(3))
+                else:
+                    ph, cur, tot = "Processing", int(m.group(1)), int(m.group(2))
+                if ph != phase:
+                    # Faz degisti: sayac ve sure sifirlanmali, yoksa kalan
+                    # sure onceki fazin hizina gore hesaplanir.
+                    phase, phase_t0, new_phase = ph, time.time(), True
             else:
-                m = _REGISTER.search(line)
-                if m:
-                    n_reg = int(m.group(1))
+                m2 = _REGISTER.search(line)
+                if m2:
+                    n_reg = int(m2.group(1))
                 elif _MATCHED.search(line):
-                    n_reg = n_reg + 1 if n_reg else 1
-                m = _ITER.search(line)
-                if m:
-                    iter_times.append(float(m.group(3)))
+                    n_reg += 1
+                m2 = _ITER.search(line)
+                if m2:
+                    iter_times.append(float(m2.group(2)))
 
             now = time.time()
-            if now - last < every:
+            if not new_phase and now - last < every:
                 continue
             last = now
-            el = now - t0
 
             if watch is not None:
                 wdir, suf, wtot = watch
                 cur = len(list(wdir.glob(f"*{suf}"))) if wdir.is_dir() else 0
-                tot = wtot
+                tot, phase_t0 = wtot, t0
+
+            el = now - phase_t0
+            tag = f"{label}·{phase.lower()}" if phase else label
 
             if tot:
                 pct = 100.0 * cur / tot
                 eta = el / cur * (tot - cur) if cur else 0.0
                 extra = ""
                 if iter_times:
-                    extra = f" · {sum(iter_times[-20:])/len(iter_times[-20:]):.1f} sn/iter"
-                print(f"  [{label}] {cur}/{tot}  %{pct:.0f}  "
+                    extra = (f" · {sum(iter_times[-20:])/len(iter_times[-20:]):.1f}"
+                             " sn/iter")
+                print(f"  [{tag}] {cur}/{tot}  %{pct:.0f}  "
                       f"gecen {_fmt(el)}  kalan ~{_fmt(eta)}{extra}", flush=True)
             elif n_reg:
                 unit = "cift" if label == "eslestirme" else "goruntu"
-                print(f"  [{label}] {n_reg} {unit} islendi  "
-                      f"gecen {_fmt(el)}", flush=True)
+                print(f"  [{tag}] {n_reg} {unit} islendi  gecen {_fmt(el)}",
+                      flush=True)
             else:
-                print(f"  [{label}] calisiyor…  gecen {_fmt(el)}", flush=True)
+                print(f"  [{tag}] sayac yok — calisiyor, gecen {_fmt(now - t0)}",
+                      flush=True)
 
         p.wait()
         lf.flush()
