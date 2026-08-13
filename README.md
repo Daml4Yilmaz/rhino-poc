@@ -30,7 +30,7 @@ Denek sabit oturur, **ikinci bir kişi** telefonu tutup yayı yürür.
 - [ ] Yine de AF avlanmasını azalt: mesafeyi sabit tut (AF derinlik değişince arar), kaydı yüz zaten çerçevedeyken başlat ve 2 sn bekle, yüksek kontrastlı fon geçişlerinde süpürme.
 - [ ] Kayıt uygulaması: **Stray Scanner** veya Record3D. **iPhone'un kendi Kamera uygulaması yetmez** — o yalnızca pikselleri kaydeder, ARKit kamera pozunu ve LiDAR derinliğini dosyaya yazmaz. Ölçek videonun içinde değil, çekim anındaki hareket takibindedir; kayıt bittikten sonra geri gelmez. Stok Kamera 4K (8.3 MP) ile daha iyi doku verir ama **milimetre vermez** → yalnızca açılar ve Goode oranı hesaplanabilir, G1 karşılanamaz.
   - Stray Scanner LiDAR'lı cihaz ister (iPhone 12 Pro ve sonrası; 14 Pro Max uygun). LiDAR yoksa Record3D yalnız ARKit poziyle çalışır, `s_depth` çapraz kontrolü devre dışı kalır.
-  - 1920×1440 yeterli mi? 65 cm'den yüz kısa kenarın ~%60'ını kaplar → **~4 piksel/mm**. 2 mm hedefi için fazlasıyla yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
+  - 1920×1440 yeterli mi? Ölçülen `fx ≈ 1380 px`, mesafe 65 cm → **~2.1 piksel/mm** (yüz kare genişliğinin ~%30'unu kaplar). 2 mm hedefi için yeterli; 4K'nın üstünlüğü geometride değil dokudadır (WP7).
 
 **Geçiş 1 — göz hizası, kulaktan kulağa**
 - [ ] Sağ kulaktan sol kulağa (ya da tersi — hangisi olduğunu kendin not al; `case.json` manifesti henüz yazılmadı), 180°
@@ -78,7 +78,23 @@ COLMAP'in bellek varsayılanları paylaşımlı ortamlar için fazla cömert ve 
 | `StereoFusion.cache_size` | 32 GB | aynı değer |
 | `StereoFusion.use_cache` | **0** (her şeyi belleğe alır) | 1 |
 
-Colab (~12.7 GB RAM) için bu ~3–4 GB'a denk gelir. Önbellek boyutu **kaliteyi etkilemez**, yalnızca disk trafiğini artırır. Yine de `SIGKILL` alırsan `--mvs-cache-gb 2` ile kıs; o da yetmezse görüntü boyutunu düşür (`--max-dim 1200`, **yeni bir `OUT` ile** — kare boyutu değişince eski `dense/` kullanılamaz).
+Önbellek boyutu **kaliteyi etkilemez**, yalnızca disk trafiğini artırır.
+
+### MVS iş miktarı — asıl maliyet burada
+
+Bellek ayarı çökmeyi önler, süreyi belirlemez. `patch_match_stereo` maliyeti üç şeye bağlı ve ikisi fazla ayarlanmış gelir:
+
+| Kaldıraç | COLMAP varsayılanı | Bizde | Etki |
+|---|---|---|---|
+| Referans görüntü | kaydedilen her kare (300) | **150** (`--mvs-refs`) | doğrusal |
+| Komşu görüntü | 20 | **10** (`--mvs-src-images`) | doğrusal |
+| Çözünürlük | tam | değişmez | ~karesel |
+
+151°'yi 300 kareyle taramak görüntü başına 0.5° demek — yüzey rekonstrüksiyonu için ciddi bir fazlalık. ~1.5° aralık füzyon için fazlasıyla yeterli. Alt örnekleme zamanda düzgün dağıtılır, yoksa yayın bir ucu boş kalır.
+
+**Çözünürlüğe dokunulmaz** — doğruluğun bağlı olduğu tek parametre odur.
+
+Süre beklentisi (T4, 1600 px): referans başına ~20 sn fotometrik, geometrik geçiş bunun ~3 katı. 300 referans ≈ 6–7 saat, 150 referans + 10 komşu ≈ **1.5–2 saat**. Koşu başlarken tahmini yazdırır.
 
 ## Pipeline durumu
 

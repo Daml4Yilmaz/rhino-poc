@@ -11,6 +11,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import open3d as o3d
 
 
@@ -27,6 +28,50 @@ def _auto_cache_gb() -> int:
         return 4
 
 
+def _tune_patchmatch(cfg: Path, src_images: int, max_refs: int) -> int:
+    """patch-match.cfg'yi is miktarina gore ayarla; referans sayisini dondur.
+
+    Dosya bicimi ikili satirlardir:  <goruntu adi>\\n__auto__, <komsu>\\n
+
+    Iki kaldirac da maliyeti DOGRUSAL etkiler ve ikisi de fazla ayarlanmis
+    gelir:
+
+    REFERANS SAYISI — image_undistorter kaydedilen her goruntuyu referans
+    yapar. 151 dereceyi 300 kareyle taramak goruntu basina 0.5 derece demek;
+    yuzey rekonstruksiyonu icin bu ciddi bir fazlalik. ~1.5 derece aralik
+    (≈100-150 referans) fuzyon icin fazlasiyla yeterli. Alt ornekleme
+    ZAMANDA duzgun dagilir, yoksa yayin bir ucu bos kalir.
+
+    KOMSU SAYISI — varsayilan 20. Yuz gibi kucuk ve yogun ortusmeli bir
+    sahnede 10 komsu ayni yuzeyi verir.
+
+    Cozunurluge dokunulmaz: dogrulugun bagli oldugu tek parametre odur.
+    """
+    if not cfg.exists():
+        return 0
+    lines = [l for l in cfg.read_text().splitlines() if l.strip()]
+    blocks = [(lines[i], lines[i + 1]) for i in range(0, len(lines) - 1, 2)]
+    n0 = len(blocks)
+    if n0 == 0:
+        return 0
+
+    if max_refs and n0 > max_refs:
+        keep = np.linspace(0, n0 - 1, max_refs).round().astype(int)
+        blocks = [blocks[i] for i in sorted(set(keep.tolist()))]
+
+    out = []
+    for name, nb in blocks:
+        out.append(name)
+        out.append(re.sub(r"__auto__,\s*\d+", f"__auto__, {src_images}", nb)
+                   if src_images else nb)
+    cfg.write_text("\n".join(out) + "\n")
+
+    if len(blocks) != n0 or src_images:
+        print(f"[mvs] patch-match: {n0} -> {len(blocks)} referans, "
+              f"komsu {src_images or 'varsayilan'}")
+    return len(blocks)
+
+
 def _run(cmd: list[str], log_file: Path) -> None:
     with open(log_file, "a") as f:
         f.write("\n$ " + " ".join(cmd) + "\n")
@@ -38,7 +83,7 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             colmap_bin: str = "colmap", poisson_depth: int = 10,
             poisson_trim: float = 7.0, cache_size_gb: int | None = None,
             max_image_size: int | None = None,
-            src_images: int | None = None) -> Path:
+            src_images: int = 10, max_refs: int = 150) -> Path:
     """fused.ply + mesh_raw.ply uretir; mesh yolunu dondurur."""
     dense_dir.mkdir(parents=True, exist_ok=True)
     log = dense_dir.parent / "colmap.log"
@@ -68,20 +113,8 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
               "--output_path", str(dense_dir),
               "--output_type", "COLMAP"], log)
 
-    # Komsu (source) goruntu sayisi: image_undistorter patch-match.cfg'ye
-    # "__auto__, 20" yazar, yani her referans 20 komsuyla eslesir. Maliyet ve
-    # ONBELLEK BASKISI bununla dogru orantili: 300 goruntunun derinlik+normal
-    # haritalari ~9 GB tutar, onbellek daha kucukse surekli tahliye-yeniden
-    # okuma dongusune girilir ve is 3-4 kat yavaslar. Yuz gibi kucuk ve yogun
-    # ortusmeli bir sahnede 20 komsu fazladir.
-    if src_images:
-        cfg = dense_dir / "stereo" / "patch-match.cfg"
-        if cfg.exists():
-            txt = cfg.read_text()
-            new = re.sub(r"__auto__,\s*\d+", f"__auto__, {src_images}", txt)
-            if new != txt:
-                cfg.write_text(new)
-                print(f"[mvs] komsu goruntu sayisi -> {src_images}")
+    n_ref = _tune_patchmatch(dense_dir / "stereo" / "patch-match.cfg",
+                             src_images, max_refs)
 
     # cache_size VARSAYILANI 32 GB'dir; Colab'in ~12.7 GB RAM'inde surec
     # OOM killer tarafindan SIGKILL ile oldurulur (abort degil, sessiz olum).
@@ -94,7 +127,11 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
            "--PatchMatchStereo.cache_size", str(cache_gb)]
     if max_image_size:
         cmd += ["--PatchMatchStereo.max_image_size", str(max_image_size)]
-    print(f"[mvs] patch_match basliyor (onbellek {cache_gb} GB)")
+    # Kaba sure tahmini: T4'te 1600px'te referans basina ~20 sn fotometrik,
+    # geometrik gecis bunun ~3 kati. Kullaniciya ne bekleyecegini soyle.
+    est = n_ref * 20 * 4 / 60
+    print(f"[mvs] patch_match: {n_ref} referans, onbellek {cache_gb} GB "
+          f"— T4'te kabaca {est:.0f} dk (hazir derinlik haritalari atlanir)")
     _run(cmd, log)
 
     # stereo_fusion da ayni tuzagi tasir, hatta daha kotusu: use_cache
@@ -118,7 +155,6 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
         pcd.estimate_normals()
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=poisson_depth)
-    import numpy as np
     dens = np.asarray(densities)
     mesh.remove_vertices_by_mask(dens < np.quantile(dens, poisson_trim / 100.0))
     mesh.remove_degenerate_triangles()

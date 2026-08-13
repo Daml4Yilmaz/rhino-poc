@@ -61,7 +61,8 @@ def process(
     max_dim: int = typer.Option(1600, help="COLMAP karesinin uzun kenari (0=kucultme)"),
     mvs_cache_gb: int = typer.Option(0, help="MVS onbellegi GB (0=RAM'e gore otomatik)"),
     mvs_max_dim: int = typer.Option(0, help="MVS'te goruntu uzun kenari (0=kirpma yok)"),
-    mvs_src_images: int = typer.Option(0, help="Her referans icin komsu sayisi (0=COLMAP varsayilani 20)"),
+    mvs_src_images: int = typer.Option(10, help="Her referans icin komsu sayisi"),
+    mvs_refs: int = typer.Option(150, help="MVS referans goruntu ust siniri (0=hepsi)"),
     until: str = typer.Option("measure", help=f"Bu adimdan sonra dur: {STEPS}"),
     sift_gpu: bool = typer.Option(True, "--sift-gpu/--no-sift-gpu",
                                   help="COLMAP SIFT'i GPU'da kos (macOS'ta kapat)"),
@@ -127,7 +128,7 @@ def process(
                            cfg.colmap_bin, cfg.poisson_depth, cfg.poisson_trim,
                            cache_size_gb=mvs_cache_gb or None,
                            max_image_size=mvs_max_dim or None,
-                           src_images=mvs_src_images or None)
+                           src_images=mvs_src_images, max_refs=mvs_refs)
     if stop < 3:
         return _done(t0)
 
