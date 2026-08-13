@@ -45,7 +45,7 @@ The notebook is linear and has three phases:
 1. install and verify CUDA-enabled COLMAP;
 2. download the official MediaPipe model, validate the capture, and build a metric sparse
    checkpoint;
-3. run dense reconstruction, export, landmarks, and measurements.
+3. run dense reconstruction, texture mapping, metric export, landmarks, and measurements.
 
 The notebook runs compute-intensive work on `/content`, not through Google Drive's FUSE layer.
 It copies checkpoints and final artifacts back to Drive.
@@ -136,13 +136,21 @@ case_001/
 ├── colmap/
 ├── face_mesh_raw.ply
 ├── scale.json
+├── face_geometry.ply
+├── geometry.json
+├── texture/
+│   ├── mesh.ply
+│   └── texture.png
 ├── face_model.glb
 ├── landmarks.json
 └── measurements.json
 ```
 
-The GLB stores geometry in metres, following the glTF convention. Landmark and measurement JSON
-files use millimetres.
+`face_geometry.ply` is the authoritative surface in metres. `geometry.json` records its identity,
+topology, visual correspondence, and displacement policy. The GLB contains the same registered
+surface with a source-image UV texture atlas; UV seams may duplicate render vertices, but render
+triangle indices remain one-to-one with authoritative triangles. Landmark and measurement JSON
+files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Capture protocol
 
@@ -161,10 +169,11 @@ The reference capture is stored sideways without rotation metadata. The default
 ## Measurement status
 
 Landmarks are detected with MediaPipe Tasks' explicit CPU delegate in multiple registered views,
-robustly triangulated, and snapped to the
-reconstructed surface. Measurement definitions are centralized and explicitly labeled
-`provisional_*_v1`. They are suitable for engineering evaluation only and must be reviewed by a
-surgeon before any clinical study.
+robustly triangulated, and projected onto authoritative triangles. Every landmark stores its
+triangle index and barycentric coordinates so it remains registered during clicking and future
+deformation. Measurement definitions are centralized and explicitly labeled provisional. They are
+suitable for engineering evaluation only and must be reviewed by a surgeon before any clinical
+study.
 
 No accuracy claim is currently possible because the project has no manual reference measurements
 or repeat captures.

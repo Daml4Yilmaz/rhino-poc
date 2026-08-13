@@ -40,7 +40,9 @@ Stray export
   -> ARKit trajectory scale with LiDAR cross-check
   -> face-only photometric PatchMatch and fusion
   -> Poisson surface and largest-component cleanup
-  -> metric GLB
+  -> versioned authoritative metric surface
+  -> color-corrected UV texture atlas
+  -> registered textured GLB
   -> multi-view landmark triangulation
   -> six provisional measurements
 ```
@@ -103,7 +105,8 @@ For the surface-only milestone, FLAME is intentionally excluded.
 
 - Detect provisional MediaPipe landmarks in registered views.
 - Back-project rays using the measured intrinsics and refined camera poses.
-- Robustly triangulate each point and snap it to the reconstructed surface.
+- Robustly triangulate each point and project it to an authoritative triangle.
+- Store triangle index and barycentric coordinates for exact surface correspondence.
 - Calculate the six requested measurements from centralized definitions.
 - Store quality metadata and label definitions provisional.
 
@@ -135,6 +138,8 @@ results.
 - Face and nasal base are visually continuous.
 - Room, torso, and cap do not dominate the retained mesh component.
 - Scale JSON contains pose diagnostics and a LiDAR comparison.
+- The authoritative PLY, textured GLB, landmarks, and measurements share one geometry identity.
+- Every rendered face maps to the same-index authoritative triangle within one micrometre.
 
 ### M3 — Provisional measurements
 
@@ -171,5 +176,5 @@ results.
 - Android support;
 - FLAME or another morphable model;
 - Gaussian or neural surface reconstruction;
-- texture baking and clinical viewer;
+- clinical viewer and material-map refinement;
 - subcutaneous anatomy and surgical simulation.

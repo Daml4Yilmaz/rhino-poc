@@ -20,6 +20,7 @@ class ReconstructionConfig:
     mvs_cache_gb: int | None = None
     mvs_max_image_size: int | None = None
     poisson_depth: int = 9
+    texture_scale_factor: float = 1.0
     scale_agreement_percent: float = 2.0
     colmap_binary: str = "colmap"
 
@@ -66,6 +67,26 @@ class ReconstructionConfig:
     @property
     def scale_path(self) -> Path:
         return self.output_dir / "scale.json"
+
+    @property
+    def authoritative_mesh_path(self) -> Path:
+        return self.output_dir / "face_geometry.ply"
+
+    @property
+    def geometry_metadata_path(self) -> Path:
+        return self.output_dir / "geometry.json"
+
+    @property
+    def texture_dir(self) -> Path:
+        return self.output_dir / "texture"
+
+    @property
+    def textured_mesh_path(self) -> Path:
+        return self.texture_dir / "mesh.ply"
+
+    @property
+    def texture_image_path(self) -> Path:
+        return self.texture_dir / "texture.png"
 
     @property
     def glb_path(self) -> Path:

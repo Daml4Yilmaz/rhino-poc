@@ -23,7 +23,17 @@ app = typer.Typer(
     help="Metric facial surface reconstruction from Stray Scanner capture data.",
 )
 
-STAGES = ("ingest", "mask", "sfm", "scale", "mvs", "export", "landmarks", "measure")
+STAGES = (
+    "ingest",
+    "mask",
+    "sfm",
+    "scale",
+    "mvs",
+    "texture",
+    "export",
+    "landmarks",
+    "measure",
+)
 
 
 def _remove_path(path: Path) -> None:
@@ -130,6 +140,7 @@ def reconstruct(
     mvs_source_images: Annotated[int, typer.Option(min=4, max=12)] = 6,
     mvs_geometric: Annotated[bool, typer.Option("--mvs-geometric/--no-mvs-geometric")] = False,
     mvs_cache_gb: Annotated[int, typer.Option(min=0, max=12)] = 0,
+    texture_scale: Annotated[float, typer.Option(min=0.5, max=2.0)] = 1.0,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Run the complete surface reconstruction and measurement pipeline."""
@@ -146,6 +157,7 @@ def reconstruct(
         mvs_source_images=mvs_source_images,
         mvs_geometric_consistency=mvs_geometric,
         mvs_cache_gb=mvs_cache_gb or None,
+        texture_scale_factor=texture_scale,
     )
     configure_logging(config.log_path, verbose=verbose)
     logger = get_logger()
@@ -329,22 +341,74 @@ def reconstruct(
     if stop_index == 4:
         return
 
-    def export_action() -> dict:
-        from .pipeline.export import export_glb
+    def texture_action() -> dict:
+        from .pipeline.texture import run_texture_mapping
 
-        export_glb(config.raw_mesh_path, scale_mm_per_unit, config.glb_path)
-        return {"glb": str(config.glb_path), "units": "metres"}
+        textured_mesh, texture_image = run_texture_mapping(
+            config.dense_dir,
+            config.raw_mesh_path,
+            config.texture_dir,
+            colmap_binary=config.colmap_binary,
+            texture_scale_factor=config.texture_scale_factor,
+        )
+        return {
+            "textured_mesh": str(textured_mesh),
+            "texture_image": str(texture_image),
+        }
 
     dependency = _run_stage(
         manifest,
-        "export",
-        {"glb_units": "metres"},
-        [config.glb_path],
-        export_action,
+        "texture",
+        {
+            "method": "colmap_mesh_texturer",
+            "color_correction": True,
+            "texture_scale_factor": config.texture_scale_factor,
+        },
+        [config.textured_mesh_path, config.texture_image_path],
+        texture_action,
         dependency_signature=dependency,
         resume=resume,
     )
     if stop_index == 5:
+        return
+
+    def export_action() -> dict:
+        from .pipeline.export import export_glb
+        from .pipeline.geometry import create_authoritative_geometry
+
+        geometry = create_authoritative_geometry(
+            config.raw_mesh_path,
+            scale_mm_per_unit,
+            config.authoritative_mesh_path,
+            config.geometry_metadata_path,
+        )
+        export_glb(
+            config.authoritative_mesh_path,
+            config.geometry_metadata_path,
+            config.glb_path,
+            textured_mesh_path=config.textured_mesh_path,
+        )
+        return {
+            "authoritative_mesh": str(config.authoritative_mesh_path),
+            "geometry_id": geometry["geometry_id"],
+            "glb": str(config.glb_path),
+            "units": "metres",
+        }
+
+    dependency = _run_stage(
+        manifest,
+        "export",
+        {
+            "geometry_schema": 1,
+            "glb_units": "metres",
+            "topology_policy": "registered_face_identity",
+        },
+        [config.authoritative_mesh_path, config.geometry_metadata_path, config.glb_path],
+        export_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    if stop_index == 6:
         return
 
     def landmarks_action() -> dict:
@@ -354,7 +418,8 @@ def reconstruct(
             config.reconstruction_images_dir,
             selected_sparse_model,
             config.frame_index_path,
-            config.raw_mesh_path,
+            config.authoritative_mesh_path,
+            config.geometry_metadata_path,
             scale_mm_per_unit,
             config.landmarks_path,
             face_landmarker_model,
@@ -365,15 +430,16 @@ def reconstruct(
         manifest,
         "landmarks",
         {
-            "definition": "provisional_mediapipe_surface_landmarks_v1",
+            "definition": "provisional_mediapipe_surface_landmarks_v2",
             "model_sha256": model_digest,
+            "surface_binding": "triangle_index_and_barycentric_coordinates",
         },
         [config.landmarks_path],
         landmarks_action,
         dependency_signature=dependency,
         resume=resume,
     )
-    if stop_index == 6:
+    if stop_index == 7:
         return
 
     def measure_action() -> dict:

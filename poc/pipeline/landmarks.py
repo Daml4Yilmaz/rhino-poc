@@ -62,26 +62,56 @@ def _robust_triangulation(
     return _closest_point_to_rays(centers[active], directions[active]), active
 
 
-def _snap_to_mesh(points: dict[str, np.ndarray], mesh_path: Path) -> dict[str, np.ndarray]:
+def _bind_to_surface(
+    points_m: dict[str, np.ndarray], mesh_path: Path
+) -> tuple[dict[str, np.ndarray], dict[str, dict], dict[str, float]]:
+    """Project points onto triangles and retain deformation-safe surface bindings."""
     import open3d as o3d
 
-    mesh = o3d.io.read_triangle_mesh(str(mesh_path))
-    vertices = np.asarray(mesh.vertices)
-    if not len(vertices):
-        raise RuntimeError(f"Cannot snap landmarks to an empty mesh: {mesh_path}")
-    tree = o3d.geometry.KDTreeFlann(mesh)
+    legacy_mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+    vertices = np.asarray(legacy_mesh.vertices, dtype=np.float64)
+    triangles = np.asarray(legacy_mesh.triangles, dtype=np.int64)
+    if not len(vertices) or not len(triangles):
+        raise RuntimeError(f"Cannot bind landmarks to an empty mesh: {mesh_path}")
+
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy_mesh))
+    names = list(points_m)
+    queries = np.asarray([points_m[name] for name in names], dtype=np.float32)
+    result = scene.compute_closest_points(o3d.core.Tensor(queries))
+    closest = result["points"].numpy().astype(np.float64)
+    triangle_ids = result["primitive_ids"].numpy().astype(np.int64)
+    primitive_uvs = result["primitive_uvs"].numpy().astype(np.float64)
+
     snapped: dict[str, np.ndarray] = {}
-    for name, point in points.items():
-        _, indices, _ = tree.search_knn_vector_3d(point, 1)
-        snapped[name] = vertices[indices[0]] if indices else point
-    return snapped
+    bindings: dict[str, dict] = {}
+    distances_mm: dict[str, float] = {}
+    for row, name in enumerate(names):
+        triangle_id = int(triangle_ids[row])
+        if triangle_id < 0 or triangle_id >= len(triangles):
+            raise RuntimeError(f"No authoritative surface found for landmark '{name}'")
+        u, v = primitive_uvs[row]
+        barycentric = np.asarray([1.0 - u - v, u, v], dtype=np.float64)
+        triangle = triangles[triangle_id]
+        bound_point = barycentric @ vertices[triangle]
+        if np.linalg.norm(bound_point - closest[row]) > 1e-6:
+            raise RuntimeError(f"Invalid barycentric surface binding for landmark '{name}'")
+        snapped[name] = bound_point
+        bindings[name] = {
+            "triangle_index": triangle_id,
+            "barycentric": barycentric.round(10).tolist(),
+            "position_m": bound_point.round(10).tolist(),
+        }
+        distances_mm[name] = float(np.linalg.norm(bound_point - points_m[name]) * 1000.0)
+    return snapped, bindings, distances_mm
 
 
 def triangulate_landmarks(
     images_dir: Path,
     sparse_model: Path,
     frame_index: Path,
-    mesh_path: Path,
+    authoritative_mesh_path: Path,
+    geometry_metadata_path: Path,
     scale_mm_per_unit: float,
     output_json: Path,
     model_path: Path,
@@ -141,15 +171,23 @@ def triangulate_landmarks(
             ),
         }
 
-    snapped = _snap_to_mesh(triangulated, mesh_path)
-    landmarks_mm = {
-        name: (point * scale_mm_per_unit).round(5).tolist() for name, point in snapped.items()
+    geometry = json.loads(geometry_metadata_path.read_text(encoding="utf-8"))
+    triangulated_m = {
+        name: point * (scale_mm_per_unit / 1000.0) for name, point in triangulated.items()
     }
+    snapped, surface_bindings, snap_distances_mm = _bind_to_surface(
+        triangulated_m, authoritative_mesh_path
+    )
+    landmarks_mm = {name: (point * 1000.0).round(5).tolist() for name, point in snapped.items()}
+    for name, distance_mm in snap_distances_mm.items():
+        quality[name]["surface_snap_distance_mm"] = round(distance_mm, 3)
     result = {
-        "schema_version": 1,
-        "definition": "provisional_mediapipe_surface_landmarks_v1",
+        "schema_version": 2,
+        "definition": "provisional_mediapipe_surface_landmarks_v2",
+        "geometry_id": geometry["geometry_id"],
         "units": "millimetres",
         "landmarks": landmarks_mm,
+        "surface_bindings": surface_bindings,
         "quality": quality,
     }
     output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")

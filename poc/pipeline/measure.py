@@ -71,6 +71,7 @@ def run_measurements(landmarks_json: Path, output_json: Path) -> dict[str, float
     result = {
         "schema_version": 1,
         "definition": "provisional_surface_rhinoplasty_measurements_v1",
+        "geometry_id": document.get("geometry_id"),
         "warning": "Definitions require surgeon review before clinical use.",
         "measurements": measurements,
     }
