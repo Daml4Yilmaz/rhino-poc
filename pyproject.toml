@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhino-poc"
-version = "0.7.0"
+version = "0.8.0"
 description = "Telefon videosundan gercek olcekli 3D yuz modeli + 6 rinoplasti olcumu (PoC)"
 requires-python = ">=3.10"
 dependencies = [

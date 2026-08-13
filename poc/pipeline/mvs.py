@@ -66,6 +66,13 @@ def _tune_patchmatch(cfg: Path, src_images: int, max_refs: int) -> int:
                    if src_images else nb)
     cfg.write_text("\n".join(out) + "\n")
 
+    # fusion.cfg AYNI listeye indirilmeli. stereo_fusion kendi listesini
+    # oradan okur; patch-match'i 150'ye indirip fusion'a 300 birakirsak
+    # fuzyon var olmayan derinlik haritalarini arar ve coker.
+    fus = cfg.parent / "fusion.cfg"
+    if fus.exists() and len(blocks) != n0:
+        fus.write_text("\n".join(name for name, _ in blocks) + "\n")
+
     if len(blocks) != n0 or src_images:
         print(f"[mvs] patch-match: {n0} -> {len(blocks)} referans, "
               f"komsu {src_images or 'varsayilan'}")
@@ -83,7 +90,8 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
             colmap_bin: str = "colmap", poisson_depth: int = 10,
             poisson_trim: float = 7.0, cache_size_gb: int | None = None,
             max_image_size: int | None = None,
-            src_images: int = 10, max_refs: int = 150) -> Path:
+            src_images: int = 10, max_refs: int = 150,
+            geom_consistency: bool = True) -> Path:
     """fused.ply + mesh_raw.ply uretir; mesh yolunu dondurur."""
     dense_dir.mkdir(parents=True, exist_ok=True)
     log = dense_dir.parent / "colmap.log"
@@ -123,25 +131,30 @@ def run_mvs(frames_dir: Path, sparse_model: Path, dense_dir: Path,
     cache_gb = cache_size_gb or _auto_cache_gb()
     cmd = [colmap_bin, "patch_match_stereo",
            "--workspace_path", str(dense_dir),
-           "--PatchMatchStereo.geom_consistency", "true",
+           "--PatchMatchStereo.geom_consistency",
+           "true" if geom_consistency else "false",
            "--PatchMatchStereo.cache_size", str(cache_gb)]
     if max_image_size:
         cmd += ["--PatchMatchStereo.max_image_size", str(max_image_size)]
     # Kaba sure tahmini: T4'te 1600px'te referans basina ~20 sn fotometrik,
     # geometrik gecis bunun ~3 kati. Kullaniciya ne bekleyecegini soyle.
-    est = n_ref * 20 * 4 / 60
+    est = n_ref * 20 * (4 if geom_consistency else 1) / 60
     print(f"[mvs] patch_match: {n_ref} referans, onbellek {cache_gb} GB "
-          f"— T4'te kabaca {est:.0f} dk (hazir derinlik haritalari atlanir)")
+          f"— T4'te kabaca {est:.0f} dk (hazir derinlik haritalari atlanir)"
+          + ("" if geom_consistency else "  [geometrik gecis KAPALI]"))
     _run(cmd, log)
 
     # stereo_fusion da ayni tuzagi tasir, hatta daha kotusu: use_cache
     # VARSAYILANI 0'dir, yani butun derinlik/normal haritalarini bellege
     # yukler. Acinca sinirli bir LRU onbellege gecer — 300 goruntude fark
     # OOM ile tamamlanmis fuzyon arasindaki fark oluyor.
+    # geom kapaliysa fuzyon FOTOMETRIK haritalari okumali; varsayilani
+    # "geometric" oldugu icin aksi halde var olmayan dosyalari arar.
     fused = dense_dir / "fused.ply"
     _run([colmap_bin, "stereo_fusion",
           "--workspace_path", str(dense_dir),
           "--output_path", str(fused),
+          "--input_type", "geometric" if geom_consistency else "photometric",
           "--StereoFusion.use_cache", "1",
           "--StereoFusion.cache_size", str(cache_gb)], log)
 
