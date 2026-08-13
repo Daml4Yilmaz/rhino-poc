@@ -1,4 +1,4 @@
-"""Headless, CPU-only MediaPipe face landmark detection."""
+"""MediaPipe Tasks face landmark detection with explicit CPU inference."""
 
 from __future__ import annotations
 
@@ -12,9 +12,9 @@ import numpy as np
 class FaceLandmarkDetector:
     """Small context-managed wrapper around the MediaPipe Tasks API.
 
-    The legacy MediaPipe Solutions API may attempt to initialize an OpenGL context even when
-    processing still images. Explicitly selecting the CPU Tasks delegate keeps notebook and
-    headless execution deterministic.
+    Explicitly selecting the CPU Tasks delegate avoids platform-dependent inference selection and
+    uses XNNPACK for the model. MediaPipe may still initialize a platform image-processing service
+    as part of its graph setup.
     """
 
     def __init__(self, model_path: Path) -> None:
