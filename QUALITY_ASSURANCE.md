@@ -77,6 +77,7 @@ The final `quality` stage writes `quality_report.json` and `quality_report.html`
 |---|---|
 | Masking | PASS at ≥95% accepted views; WARN at 85–94.99%; FAIL below 85%. |
 | Sparse reconstruction | PASS at ≥80 images, ≥85% registration, and ≥10,000 sparse points; hard minimums are 40 images and 60%. |
+| Raw dense fusion | Direct COLMAP stereo-fusion artifact must exist, match its recorded file size and role, contain finite bounds and no non-finite points, and contain at least 10,000 points. Missing persisted normals are `WARN` because they may be estimated only in memory for Poisson. |
 | Scale | ARKit/COLMAP pose inlier ratio ≥0.8, median residual ≤10 mm, p95 ≤20 mm; LiDAR agreement must not explicitly fail. |
 | Authoritative mesh | Finite vertices, consistent winding, largest component ≥99.9%, median edge length 0.2–1.0 mm. Open crop boundaries are reported as `WARN`, not hidden. |
 | Geometry/visual registration | Geometry IDs match, the rendered surface stays within 1 micrometre of the authoritative surface, the atlas is at least 4K for PASS, and face-sampled near-black texture remains ≤2% for PASS (FAIL >8%). |

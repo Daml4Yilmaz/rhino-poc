@@ -7,15 +7,18 @@ its coordinates are metres in the COLMAP world frame. `geometry.json` identifies
 positions and ordered triangles with SHA-256 hashes. Measurements, landmarks, clicks, simulations,
 and visual assets must declare the same `geometry_id`.
 
-`face_mesh_raw.ply` is not authoritative. It is the unitless Poisson output retained for diagnostics
-and texture projection. Changing scale, trimming, smoothing, remeshing, or displacement after the
-authoritative asset is created produces a different geometry and therefore requires a new
-`geometry_id`.
+`face_dense_fused.ply` is the permanent, direct output of COLMAP stereo fusion before normal
+estimation and Poisson reconstruction. `face_mesh_raw.ply` is not authoritative; it is the unitless
+Poisson output retained for diagnostics and texture projection. Changing scale, trimming,
+smoothing, remeshing, or displacement after the authoritative asset is created produces a
+different geometry and therefore requires a new `geometry_id`.
 
 ## Assets and correspondence
 
 ```text
-face_mesh_raw.ply + verified scale
+face_dense_fused.ply
+        |
+        +---- Poisson ----> face_mesh_raw.ply + verified scale
                  |
                  v
         face_geometry.ply  <---- geometry.json

@@ -579,6 +579,104 @@ def _sfm_section(document: dict[str, Any]) -> dict[str, Any]:
     return _section("sparse_reconstruction", "Sparse reconstruction", checks)
 
 
+def _dense_fusion_section(case_dir: Path, document: dict[str, Any]) -> dict[str, Any]:
+    if not document:
+        return _section(
+            "dense_fusion",
+            "Raw dense stereo fusion",
+            [
+                _check(
+                    "mvs.fusion_metrics",
+                    "Stereo-fusion diagnostics available",
+                    WARN,
+                    None,
+                    "",
+                    "PASS when mvs.json is present",
+                    "Legacy cases did not preserve the direct pre-Poisson fusion output.",
+                )
+            ],
+        )
+    relative_path = document.get("path")
+    artifact_path = case_dir / relative_path if relative_path else None
+    artifact_exists = bool(artifact_path and artifact_path.is_file())
+    file_size_matches = bool(
+        artifact_exists and artifact_path.stat().st_size == document.get("file_size_bytes")
+    )
+    extent = np.asarray(document.get("bounding_box_extent", []), dtype=np.float64)
+    finite_extent = bool(
+        extent.shape == (3,) and np.all(np.isfinite(extent)) and np.all(extent >= 0)
+    )
+    checks = [
+        _check(
+            "mvs.fused_artifact_exists",
+            "Direct stereo-fusion point cloud exists",
+            PASS if artifact_exists else FAIL,
+            relative_path,
+            "",
+            "PASS when the path recorded by mvs.json exists in the case directory",
+            "The MVS stage is incomplete without its pre-Poisson diagnostic artifact.",
+        ),
+        _check(
+            "mvs.fused_artifact_role",
+            "Artifact is explicitly pre-Poisson stereo fusion",
+            PASS
+            if document.get("role") == "raw_fused_dense_point_cloud_pre_poisson"
+            and document.get("generated_by") == "COLMAP stereo_fusion"
+            else FAIL,
+            document.get("role"),
+            "",
+            "PASS only for the direct COLMAP stereo_fusion output",
+            "A mesh-derived or sparse point cloud is not an acceptable substitute.",
+        ),
+        _minimum(
+            "mvs.fused_point_count",
+            "Fused dense points",
+            document.get("point_count"),
+            100_000,
+            10_000,
+            "points",
+        ),
+        _maximum(
+            "mvs.nonfinite_points",
+            "Non-finite fused points",
+            document.get("nonfinite_point_count"),
+            0,
+            0,
+            "points",
+        ),
+        _check(
+            "mvs.fused_file_size",
+            "Persisted file size matches diagnostics",
+            PASS if file_size_matches else FAIL,
+            document.get("file_size_bytes"),
+            "bytes",
+            "PASS when the current artifact size equals the recorded size",
+            "This detects missing, truncated, or substituted artifacts.",
+        ),
+        _check(
+            "mvs.fused_bounding_box",
+            "Finite fused-point bounding box",
+            PASS if finite_extent else FAIL,
+            document.get("bounding_box_extent"),
+            "COLMAP units",
+            "PASS for three finite non-negative extents",
+            "The bounding box is measured before Poisson reconstruction.",
+        ),
+        _check(
+            "mvs.fused_normals",
+            "Normals present in persisted fusion output",
+            PASS if document.get("normals_present_in_persisted_artifact") else WARN,
+            document.get("normals_present_in_persisted_artifact"),
+            "",
+            "PASS when present; WARN when normals must be estimated in memory for Poisson",
+            "Normal estimation never overwrites the persisted fusion artifact.",
+        ),
+    ]
+    section = _section("dense_fusion", "Raw dense stereo fusion", checks)
+    section["metrics"] = document
+    return section
+
+
 def _asset_section(
     case_dir: Path,
     geometry: dict[str, Any],
@@ -805,6 +903,7 @@ def build_case_report(case_dir: Path) -> dict[str, Any]:
         capture_section,
         mask_section,
         _sfm_section(_load_json(case_dir / "sfm.json")),
+        _dense_fusion_section(case_dir, _load_json(case_dir / "mvs.json")),
         _scale_section(_load_json(case_dir / "scale.json")),
         _mesh_section(case_dir / "face_geometry.ply"),
         _landmark_section(landmarks),

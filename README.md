@@ -137,6 +137,8 @@ case_001/
 ├── masks/
 ├── reconstruction_images/
 ├── colmap/
+├── face_dense_fused.ply
+├── mvs.json
 ├── face_mesh_raw.ply
 ├── capture_quality.json
 ├── sfm.json
@@ -162,6 +164,12 @@ files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md
 Geometry reconstruction uses masked images. Texture mapping deliberately rebuilds its workspace
 from the original registered RGB frames, preventing black reconstruction masks from contaminating
 skin color and facial boundaries.
+
+`face_dense_fused.ply` is the exact output path passed to COLMAP `stereo_fusion`. It is the raw
+dense point cloud after PatchMatch and fusion but before normal estimation, Poisson reconstruction,
+or mesh cleanup. It is stored outside the disposable COLMAP workspace and is a required MVS-stage
+output. `mvs.json` records its role, point count, original normals/colors, bounding box, file size,
+SHA-256 digest, and generation stage.
 
 ## Capture protocol
 
@@ -200,4 +208,5 @@ uv run pytest
 uv run ruff check .
 ```
 
-See [PLAN.md](PLAN.md) for milestones, gates, known limitations, and the validation sequence.
+See [ALGORITHM.md](ALGORITHM.md) for the implemented algorithm, [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md)
+for acceptance criteria, and [PLAN.md](PLAN.md) for milestones and known limitations.

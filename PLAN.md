@@ -39,6 +39,7 @@ Stray export
   -> COLMAP sparse visual refinement
   -> ARKit trajectory scale with LiDAR cross-check
   -> face-only photometric PatchMatch and fusion
+  -> permanent raw fused dense point cloud diagnostics
   -> Poisson surface and largest-component cleanup
   -> versioned authoritative metric surface
   -> color-corrected UV texture atlas
@@ -144,6 +145,7 @@ results.
 
 - Complete on a T4 in less than one hour.
 - Face and nasal base are visually continuous.
+- The exact COLMAP stereo-fusion point cloud is retained before Poisson with structured diagnostics.
 - Room, torso, and cap do not dominate the retained mesh component.
 - Scale JSON contains pose diagnostics and a LiDAR comparison.
 - The authoritative PLY, textured GLB, landmarks, and measurements share one geometry identity.

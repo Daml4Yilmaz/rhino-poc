@@ -443,11 +443,14 @@ def reconstruct(
     def mvs_action() -> dict:
         from .pipeline.mvs import run_mvs
 
-        run_mvs(
+        diagnostics = run_mvs(
             config.reconstruction_images_dir,
             selected_sparse_model,
             config.dense_dir,
             config.raw_mesh_path,
+            config.fused_point_cloud_path,
+            config.mvs_metrics_path,
+            scale_mm_per_unit=scale_mm_per_unit,
             colmap_binary=config.colmap_binary,
             cache_size_gb=config.mvs_cache_gb,
             max_image_size=config.mvs_max_image_size,
@@ -456,13 +459,16 @@ def reconstruct(
             geometric_consistency=config.mvs_geometric_consistency,
             poisson_depth=config.poisson_depth,
         )
-        return {"mesh": str(config.raw_mesh_path)}
+        return {
+            "mesh": str(config.raw_mesh_path),
+            "raw_fused_point_cloud": diagnostics,
+        }
 
     dependency = _run_stage(
         manifest,
         "mvs",
         mvs_parameters,
-        [config.raw_mesh_path],
+        [config.raw_mesh_path, config.fused_point_cloud_path, config.mvs_metrics_path],
         mvs_action,
         dependency_signature=dependency,
         resume=resume,

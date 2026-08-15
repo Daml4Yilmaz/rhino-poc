@@ -73,6 +73,15 @@ class ReconstructionConfig:
         return self.output_dir / "face_mesh_raw.ply"
 
     @property
+    def fused_point_cloud_path(self) -> Path:
+        """Permanent direct output of COLMAP stereo fusion, before Poisson."""
+        return self.output_dir / "face_dense_fused.ply"
+
+    @property
+    def mvs_metrics_path(self) -> Path:
+        return self.output_dir / "mvs.json"
+
+    @property
     def scale_path(self) -> Path:
         return self.output_dir / "scale.json"
 

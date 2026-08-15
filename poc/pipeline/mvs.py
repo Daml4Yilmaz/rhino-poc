@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -87,12 +89,64 @@ def _keep_largest_component(mesh):
     return mesh
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _point_cloud_diagnostics(
+    point_cloud,
+    path: Path,
+    *,
+    scale_mm_per_unit: float,
+) -> dict:
+    """Describe the unmodified stereo-fusion artifact before Poisson processing."""
+    points = np.asarray(point_cloud.points, dtype=np.float64)
+    if not len(points):
+        raise RuntimeError(f"Stereo fusion produced an empty point cloud: {path}")
+    finite_rows = np.all(np.isfinite(points), axis=1)
+    finite_points = points[finite_rows]
+    if not len(finite_points):
+        raise RuntimeError(f"Stereo fusion produced no finite 3D points: {path}")
+    minimum = finite_points.min(axis=0)
+    maximum = finite_points.max(axis=0)
+    extent = maximum - minimum
+    return {
+        "schema_version": 1,
+        "role": "raw_fused_dense_point_cloud_pre_poisson",
+        "path": path.name,
+        "absolute_path_at_generation": str(path.resolve()),
+        "generated_by": "COLMAP stereo_fusion",
+        "source_stage": "mvs_stereo_fusion",
+        "geometry_state": "direct_stereo_fusion_output_before_normal_estimation_and_poisson",
+        "coordinate_system": "COLMAP world coordinates",
+        "coordinate_units": "COLMAP reconstruction units",
+        "point_count": len(points),
+        "nonfinite_point_count": int(len(points) - np.count_nonzero(finite_rows)),
+        "normals_present_in_persisted_artifact": bool(point_cloud.has_normals()),
+        "colors_present_in_persisted_artifact": bool(point_cloud.has_colors()),
+        "bounding_box_min": minimum.round(9).tolist(),
+        "bounding_box_max": maximum.round(9).tolist(),
+        "bounding_box_extent": extent.round(9).tolist(),
+        "metric_bounding_box_extent_mm": (extent * scale_mm_per_unit).round(4).tolist(),
+        "scale_mm_per_unit_for_diagnostics": float(scale_mm_per_unit),
+        "file_size_bytes": path.stat().st_size,
+        "sha256": _file_sha256(path),
+    }
+
+
 def run_mvs(
     images_dir: Path,
     sparse_model: Path,
     dense_dir: Path,
     output_mesh: Path,
+    fused_point_cloud_path: Path,
+    metrics_path: Path,
     *,
+    scale_mm_per_unit: float,
     colmap_binary: str = "colmap",
     cache_size_gb: int | None = None,
     max_image_size: int | None = None,
@@ -101,7 +155,7 @@ def run_mvs(
     geometric_consistency: bool = False,
     poisson_depth: int = 9,
     poisson_trim_percent: float = 4.0,
-) -> Path:
+) -> dict:
     """Run dense reconstruction with defaults designed for a sub-hour T4 budget."""
     _require_cuda_colmap(colmap_binary)
     if dense_dir.exists():
@@ -160,7 +214,10 @@ def run_mvs(
         ),
     )
 
-    fused_path = dense_dir / "fused.ply"
+    # This path is intentionally outside dense_dir. dense_dir is a disposable
+    # COLMAP workspace, while this exact stereo_fusion output is a permanent
+    # diagnostic artifact and must survive workspace cleanup.
+    fused_point_cloud_path.parent.mkdir(parents=True, exist_ok=True)
     run_command(
         [
             colmap_binary,
@@ -168,7 +225,7 @@ def run_mvs(
             "--workspace_path",
             str(dense_dir),
             "--output_path",
-            str(fused_path),
+            str(fused_point_cloud_path),
             "--input_type",
             "geometric" if geometric_consistency else "photometric",
             "--StereoFusion.use_cache",
@@ -183,18 +240,46 @@ def run_mvs(
     import open3d as o3d
 
     started_at = time.monotonic()
-    point_cloud = o3d.io.read_point_cloud(str(fused_path))
+    if not fused_point_cloud_path.is_file():
+        raise RuntimeError(
+            "COLMAP stereo fusion completed without its declared point-cloud output: "
+            f"{fused_point_cloud_path}"
+        )
+    point_cloud = o3d.io.read_point_cloud(str(fused_point_cloud_path))
+    diagnostics = _point_cloud_diagnostics(
+        point_cloud,
+        fused_point_cloud_path,
+        scale_mm_per_unit=scale_mm_per_unit,
+    )
+    diagnostics["normals_estimated_in_memory_for_poisson"] = False
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    if diagnostics["nonfinite_point_count"]:
+        raise RuntimeError(
+            "Dense fusion produced non-finite points; inspect the preserved point cloud and "
+            f"{metrics_path} before retrying"
+        )
     if len(point_cloud.points) < 10_000:
         raise RuntimeError(
             f"Dense fusion produced only {len(point_cloud.points)} points; no usable mesh can be built"
         )
     get_logger().info(
+        "Stereo fusion preserved | %,d points | %.1f MB | normals %s | %s",
+        len(point_cloud.points),
+        diagnostics["file_size_bytes"] / 1_000_000.0,
+        "present" if diagnostics["normals_present_in_persisted_artifact"] else "absent",
+        fused_point_cloud_path,
+    )
+    normals_estimated_for_poisson = not point_cloud.has_normals()
+    if normals_estimated_for_poisson:
+        point_cloud.estimate_normals()
+    diagnostics["normals_estimated_in_memory_for_poisson"] = normals_estimated_for_poisson
+    metrics_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    get_logger().info(
         "Surface reconstruction | %,d fused points | Poisson depth %d",
         len(point_cloud.points),
         poisson_depth,
     )
-    if not point_cloud.has_normals():
-        point_cloud.estimate_normals()
     mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         point_cloud, depth=poisson_depth
     )
@@ -215,4 +300,4 @@ def run_mvs(
         "vertex color available" if mesh.has_vertex_colors() else "no vertex color",
         format_duration(time.monotonic() - started_at),
     )
-    return output_mesh
+    return diagnostics

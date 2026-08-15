@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from poc.quality import FAIL, PASS, WARN, build_capture_report, evaluate_capture
+from poc.quality import (
+    FAIL,
+    PASS,
+    WARN,
+    _dense_fusion_section,
+    build_capture_report,
+    evaluate_capture,
+)
 from poc.report.repeatability import measurement_repeatability
 
 
@@ -75,3 +82,22 @@ def test_measurement_repeatability_reports_pairwise_range(tmp_path: Path) -> Non
     assert section["status"] == FAIL
     assert section["metrics"]["nose_length_mm"]["maximum_pairwise_difference"] == 2.5
     assert section["metrics"]["nose_width_mm"]["sample_standard_deviation"] > 0
+
+
+def test_dense_fusion_gate_requires_the_recorded_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "face_dense_fused.ply"
+    artifact.write_bytes(b"unaltered fusion output")
+    document = {
+        "role": "raw_fused_dense_point_cloud_pre_poisson",
+        "generated_by": "COLMAP stereo_fusion",
+        "path": artifact.name,
+        "point_count": 150_000,
+        "nonfinite_point_count": 0,
+        "file_size_bytes": artifact.stat().st_size,
+        "bounding_box_extent": [1.0, 2.0, 3.0],
+        "normals_present_in_persisted_artifact": True,
+    }
+
+    assert _dense_fusion_section(tmp_path, document)["status"] == PASS
+    artifact.unlink()
+    assert _dense_fusion_section(tmp_path, document)["status"] == FAIL
