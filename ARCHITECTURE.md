@@ -34,6 +34,11 @@ render face `i` is therefore guaranteed to represent authoritative triangle `i`,
 rendered corner positions are verified against that triangle before export. This is a registered
 representation, not an independently reconstructed mesh.
 
+The albedo atlas is projected from the original registered RGB frames, not from the
+black-background images used for dense geometry. The exported material is non-metallic PBR with a
+conservative skin roughness. These appearance choices do not change vertex positions or
+measurement coordinates.
+
 `geometry.json` records which of these relationships applies. Export fails if triangle count,
 triangle order, or surface position changes beyond one micrometre.
 
@@ -77,3 +82,11 @@ deformation parameters, and deterministic output identity recorded.
 
 Topology-changing simulation requires an explicit old-to-new surface correspondence. It must not
 reuse old landmark bindings or measurements without remapping and validation.
+
+## Acceptance state
+
+`quality_report.json` is the machine-readable decision record for a case. It evaluates capture,
+masking, sparse registration, scale, authoritative mesh integrity, landmark localization,
+geometry/visual identity, measurement definition status, and runtime independently. A successful
+file export does not imply an accepted case, and `clinical_use_authorized` remains false until a
+separate clinical validation process is completed.

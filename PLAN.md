@@ -45,6 +45,7 @@ Stray export
   -> registered textured GLB
   -> multi-view landmark triangulation
   -> six provisional measurements
+  -> versioned PASS/WARN/FAIL quality report
 ```
 
 ### 3.1 Ingest
@@ -55,6 +56,10 @@ Stray export
 - Reject captures with insufficient translation, not merely insufficient camera rotation.
 - Rotate portrait pixels and transform intrinsics through the same homogeneous pixel transform.
 - Select sharp frames in equal-duration windows rather than equal frame-count windows.
+- Decode the central subject region and report sharpness, clipping, illumination stability,
+  linear/angular speed, view coverage, focal drift, and depth-stream completeness.
+- Stop before reconstruction when `poc_engineering_v1` contains an input `FAIL`; retain `WARN`
+  cases for engineering investigation.
 
 ### 3.2 Masking
 
@@ -105,8 +110,11 @@ For the surface-only milestone, FLAME is intentionally excluded.
 
 - Detect provisional MediaPipe landmarks in registered views.
 - Back-project rays using the measured intrinsics and refined camera poses.
-- Robustly triangulate each point and project it to an authoritative triangle.
+- Robustly triangulate each point, intersect visible per-view rays with the authoritative surface,
+  and fuse those intersections with outlier rejection.
 - Store triangle index and barycentric coordinates for exact surface correspondence.
+- Report ray residual, visible surface hits, consensus dispersion, and final surface snap for every
+  landmark.
 - Calculate the six requested measurements from centralized definitions.
 - Store quality metadata and label definitions provisional.
 
@@ -152,6 +160,8 @@ results.
 - Capture at least three repeated scans of one subject.
 - Measure a calibrated rigid object through the complete pipeline.
 - Record runtime and mesh-quality changes across a small parameter grid.
+- Generate versioned case-quality and same-subject repeatability reports.
+- Require measurement repeatability and nasal-surface repeatability to pass separately.
 
 ### M5 — Clinical validation preparation
 
@@ -163,6 +173,7 @@ results.
 
 - The current reference subject appears to follow the phone with their eyes and may move slightly.
 - A convex-hull face mask may omit ears and parts of the forehead; it prioritizes nasal measurement.
+  Semantic hair/ear boundary segmentation remains required for a complete cosmetic head render.
 - Black-background dense reconstruction can produce boundary artifacts that require later refinement.
 - MediaPipe landmarks are not validated anatomical annotations.
 - LiDAR has low spatial resolution and systematic error; it is a scale check, not the nasal surface.
@@ -176,5 +187,5 @@ results.
 - Android support;
 - FLAME or another morphable model;
 - Gaussian or neural surface reconstruction;
-- clinical viewer and material-map refinement;
+- clinical viewer, semantic boundary segmentation, and derived normal/roughness map refinement;
 - subcutaneous anatomy and surgical simulation.

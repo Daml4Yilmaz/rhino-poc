@@ -65,6 +65,20 @@ def export_glb(
             raise RuntimeError("Texture mapping changed triangle order or surface positions")
         if getattr(loaded.visual, "kind", None) != "texture":
             raise RuntimeError("Textured PLY does not contain usable UV coordinates")
+        texture_image = getattr(loaded.visual.material, "image", None)
+        if texture_image is None:
+            raise RuntimeError("Textured PLY does not reference a texture image")
+        skin_material = trimesh.visual.material.PBRMaterial(
+            name="registered_skin",
+            baseColorTexture=texture_image,
+            metallicFactor=0.0,
+            roughnessFactor=0.72,
+            doubleSided=False,
+        )
+        loaded.visual = trimesh.visual.TextureVisuals(
+            uv=np.asarray(loaded.visual.uv, dtype=np.float64),
+            material=skin_material,
+        )
         mesh = loaded
         relationship = "same_triangle_order_with_uv_seam_vertex_duplication"
         role = "registered_visual_surface"
@@ -82,6 +96,9 @@ def export_glb(
             "authoritative_surface": authoritative_mesh_path.name,
             "triangle_mapping": "render_face_index_equals_authoritative_triangle_index",
             "visual_displacement_affects_measurements": False,
+            "material_model": "pbr_metallic_roughness",
+            "metallic_factor": 0.0,
+            "roughness_factor": 0.72,
         }
         tree.setdefault("asset", {}).setdefault("extras", {})["rhino_poc"] = extras
         for gltf_mesh in tree.get("meshes", []):
@@ -120,6 +137,12 @@ def export_glb(
         "maximum_position_deviation_m": maximum_deviation_m,
         "triangle_mapping": "render_face_index_equals_authoritative_triangle_index",
         "raycast_surface": authoritative_mesh_path.name,
+        "material": {
+            "model": "pbr_metallic_roughness",
+            "metallic_factor": 0.0,
+            "roughness_factor": 0.72,
+            "base_color_source": "registered_original_rgb_views",
+        },
     }
     geometry_metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     extents_mm = authoritative.bounding_box.extents * 1000.0

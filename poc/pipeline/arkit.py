@@ -36,7 +36,7 @@ class ArkitCapture:
     depth_dir: Path | None
     confidence_dir: Path | None
     source: str = "stray"
-    validation_summary: dict[str, float | int | bool] | None = None
+    validation_summary: dict[str, float | int | bool | list[int]] | None = None
 
     @property
     def n_frames(self) -> int:
@@ -197,10 +197,15 @@ def orientation_coverage_degrees(capture: ArkitCapture) -> float:
     return float(np.degrees(np.arccos(similarities)).max())
 
 
-def validate_capture(capture: ArkitCapture) -> dict[str, float | int | bool]:
-    """Validate synchronization, trajectory continuity, and useful translation."""
-    if capture.n_frames < 120:
-        raise RuntimeError(f"Capture has only {capture.n_frames} frames; at least 120 are required")
+def validate_capture(capture: ArkitCapture) -> dict[str, float | int | bool | list[int]]:
+    """Validate structural integrity and calculate capture-quality metrics.
+
+    This function raises only for structurally unusable data. Product acceptance
+    thresholds are versioned separately in :mod:`poc.quality` so a capture can be
+    inspected and receive an explicit PASS/WARN/FAIL report.
+    """
+    if capture.n_frames < 2:
+        raise RuntimeError("Capture must contain at least two synchronized frames")
 
     timestamps = capture.timestamps
     intervals = np.diff(timestamps)
@@ -210,11 +215,6 @@ def validate_capture(capture: ArkitCapture) -> dict[str, float | int | bool]:
     centers = capture.centers
     steps = np.linalg.norm(np.diff(centers, axis=0), axis=1)
     jump_count = int(np.count_nonzero(steps > 0.15))
-    if jump_count > max(1, round(capture.n_frames * 0.02)):
-        raise RuntimeError(
-            f"ARKit tracking is discontinuous: {jump_count} frame-to-frame jumps exceed 15 cm"
-        )
-
     path_length = float(steps.sum())
     trajectory_span = float(np.linalg.norm(np.ptp(centers, axis=0)))
     coverage = orientation_coverage_degrees(capture)
@@ -223,23 +223,40 @@ def validate_capture(capture: ArkitCapture) -> dict[str, float | int | bool]:
     focal_lengths = capture.intrinsics[:, 0, 0]
     focal_drift = float(np.ptp(focal_lengths) / np.mean(focal_lengths) * 100.0)
 
-    # Orientation alone cannot prove parallax: a stationary camera can pan.
-    if trajectory_span < 0.25 or path_length < 0.75:
-        raise RuntimeError(
-            f"Camera translation is insufficient for reconstruction: path={path_length:.2f} m, "
-            f"span={trajectory_span:.2f} m"
-        )
+    linear_speeds = steps / intervals
+    normalized_quaternions = capture.quaternions / np.linalg.norm(
+        capture.quaternions, axis=1, keepdims=True
+    )
+    quaternion_dots = np.abs(
+        np.sum(normalized_quaternions[:-1] * normalized_quaternions[1:], axis=1)
+    )
+    angular_steps = np.degrees(2.0 * np.arccos(np.clip(quaternion_dots, 0.0, 1.0)))
+    angular_speeds = angular_steps / intervals
+    depth_file_count = (
+        len(list(capture.depth_dir.glob("*.png"))) if capture.depth_dir is not None else 0
+    )
+    confidence_file_count = (
+        len(list(capture.confidence_dir.glob("*.png"))) if capture.confidence_dir is not None else 0
+    )
 
-    summary: dict[str, float | int | bool] = {
+    summary: dict[str, float | int | bool | list[int]] = {
         "frame_count": capture.n_frames,
+        "rgb_size": list(capture.rgb_size),
         "duration_seconds": round(duration, 3),
         "effective_fps": round(effective_fps, 3),
+        "timestamp_interval_p95_ms": round(float(np.percentile(intervals, 95)) * 1000.0, 3),
         "path_length_m": round(path_length, 3),
         "trajectory_span_m": round(trajectory_span, 3),
         "orientation_coverage_degrees": round(coverage, 2),
         "tracking_jump_count": jump_count,
+        "linear_speed_p95_m_per_s": round(float(np.percentile(linear_speeds, 95)), 3),
+        "angular_speed_p95_deg_per_s": round(float(np.percentile(angular_speeds, 95)), 2),
         "focal_length_drift_percent": round(focal_drift, 3),
         "has_depth": capture.has_depth,
+        "depth_frame_count": depth_file_count,
+        "depth_frame_coverage": round(depth_file_count / capture.n_frames, 4),
+        "confidence_frame_count": confidence_file_count,
+        "confidence_frame_coverage": round(confidence_file_count / capture.n_frames, 4),
     }
     get_logger().info(
         "Capture validated | %d frames | %.1fs at %.1f effective fps | %.2fm path | "

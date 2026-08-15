@@ -43,9 +43,10 @@ Open [`colab_reconstruction.ipynb`](colab_reconstruction.ipynb) in Colab and sel
 The notebook is linear and has three phases:
 
 1. install and verify CUDA-enabled COLMAP;
-2. download the official MediaPipe model, validate the capture, and build a metric sparse
-   checkpoint;
-3. run dense reconstruction, texture mapping, metric export, landmarks, and measurements.
+2. download the official MediaPipe model, run the versioned capture preflight, and build a metric
+   sparse checkpoint;
+3. run dense reconstruction, registered texture mapping, metric export, landmarks, measurements,
+   and the final acceptance report.
 
 The notebook runs compute-intensive work on `/content`, not through Google Drive's FUSE layer.
 It copies checkpoints and final artifacts back to Drive.
@@ -72,10 +73,10 @@ uv venv --python 3.11
 uv pip install -e '.[dev]'
 ```
 
-Inspect a capture without reconstructing it:
+Inspect a capture without reconstructing it. A failed input returns exit code 2:
 
 ```bash
-poc inspect /path/to/stray_capture --json
+poc inspect /path/to/stray_capture --output input_quality.json --json
 ```
 
 Download the official MediaPipe Tasks model once:
@@ -121,6 +122,8 @@ Files:
 - `run.log`: structured application log;
 - `colmap/colmap.log`: complete raw COLMAP output and commands;
 - `case.json`: stage state, parameters, signatures, and elapsed times.
+- `capture_quality.json`: pre-reconstruction capture acceptance report;
+- `quality_report.json` and `quality_report.html`: final stage-by-stage acceptance report.
 
 Use `--verbose` to mirror raw COLMAP lines to the terminal.
 
@@ -135,6 +138,8 @@ case_001/
 ├── reconstruction_images/
 ├── colmap/
 ├── face_mesh_raw.ply
+├── capture_quality.json
+├── sfm.json
 ├── scale.json
 ├── face_geometry.ply
 ├── geometry.json
@@ -143,14 +148,20 @@ case_001/
 │   └── texture.png
 ├── face_model.glb
 ├── landmarks.json
-└── measurements.json
+├── measurements.json
+├── quality_report.json
+└── quality_report.html
 ```
 
 `face_geometry.ply` is the authoritative surface in metres. `geometry.json` records its identity,
 topology, visual correspondence, and displacement policy. The GLB contains the same registered
-surface with a source-image UV texture atlas; UV seams may duplicate render vertices, but render
+surface with a source-image UV texture atlas and non-metallic skin material; UV seams may duplicate render vertices, but render
 triangle indices remain one-to-one with authoritative triangles. Landmark and measurement JSON
 files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Geometry reconstruction uses masked images. Texture mapping deliberately rebuilds its workspace
+from the original registered RGB frames, preventing black reconstruction masks from contaminating
+skin color and facial boundaries.
 
 ## Capture protocol
 
@@ -163,20 +174,24 @@ files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md
   - lower arc tilted upward to expose the nasal base.
 - Do not stop recording between passes; one ARKit session provides one metric coordinate system.
 
+The complete filming instructions and numeric PASS/WARN/FAIL thresholds are in
+[QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md).
+
 The reference capture is stored sideways without rotation metadata. The default
 `--rotation clockwise` normalizes it to portrait and transforms camera intrinsics consistently.
 
 ## Measurement status
 
-Landmarks are detected with MediaPipe Tasks' explicit CPU delegate in multiple registered views,
-robustly triangulated, and projected onto authoritative triangles. Every landmark stores its
+Landmarks are detected with MediaPipe Tasks' explicit CPU delegate in multiple registered views.
+Triangulated rays initialize a robust consensus of visible ray–surface intersections. Every landmark stores its
 triangle index and barycentric coordinates so it remains registered during clicking and future
 deformation. Measurement definitions are centralized and explicitly labeled provisional. They are
 suitable for engineering evaluation only and must be reviewed by a surgeon before any clinical
 study.
 
-No accuracy claim is currently possible because the project has no manual reference measurements
-or repeat captures.
+For same-subject repeats, `poc repeatability-report` computes measurement variation and rigid-only
+nasal surface distances. Repeatability is not accuracy: no accuracy claim is currently possible
+because the project has no manual reference measurements or traceable facial ground truth.
 
 ## Development
 

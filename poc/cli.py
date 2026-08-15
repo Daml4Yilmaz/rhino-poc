@@ -33,6 +33,7 @@ STAGES = (
     "export",
     "landmarks",
     "measure",
+    "quality",
 )
 
 
@@ -88,15 +89,124 @@ def inspect(
     json_output: Annotated[
         bool, typer.Option("--json", help="Print machine-readable JSON.")
     ] = False,
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Optional capture-quality JSON destination."),
+    ] = None,
+    analyze_video: Annotated[
+        bool,
+        typer.Option(
+            "--analyze-video/--skip-video-analysis",
+            help="Decode all frames to evaluate sharpness, clipping, and illumination stability.",
+        ),
+    ] = True,
 ) -> None:
-    """Validate a Stray export without starting reconstruction."""
+    """Generate a PASS/WARN/FAIL input report without reconstructing."""
     configure_logging()
     from .pipeline.arkit import load_capture
+    from .quality import FAIL, build_capture_report, write_report
 
     loaded = load_capture(capture)
     summary = loaded.validation_summary or {}
+    video_quality = None
+    if analyze_video:
+        from .pipeline.input_quality import decode_video_quality, summarize_video_quality
+
+        series = decode_video_quality(loaded.rgb_path, loaded.n_frames)
+        video_quality = summarize_video_quality(series)
+    report = build_capture_report(summary, video_quality)
+    if output is not None:
+        write_report(report, output.expanduser().resolve())
     if json_output:
-        typer.echo(json.dumps(summary, indent=2))
+        typer.echo(json.dumps(report, indent=2))
+    else:
+        get_logger().info(
+            "Input acceptance | %s | profile %s",
+            report["overall_status"],
+            report["profile_id"],
+        )
+        for section in report["sections"]:
+            for check in section["checks"]:
+                if check["status"] != "PASS":
+                    get_logger().warning(
+                        "%s | %s = %s %s | %s",
+                        check["status"],
+                        check["label"],
+                        check["value"],
+                        check["unit"],
+                        check["criteria"],
+                    )
+    if report["overall_status"] == FAIL:
+        raise typer.Exit(code=2)
+
+
+@app.command("quality-report")
+def quality_report(
+    case: Annotated[Path, typer.Argument(exists=True, file_okay=False)],
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="JSON destination; defaults inside the case."),
+    ] = None,
+    html_output: Annotated[
+        Path | None,
+        typer.Option("--html-output", help="HTML destination; defaults inside the case."),
+    ] = None,
+    strict: Annotated[
+        bool,
+        typer.Option(help="Exit with status 2 when any acceptance check fails."),
+    ] = False,
+) -> None:
+    """Evaluate an existing case using the versioned engineering profile."""
+    configure_logging()
+    from .quality import FAIL, build_case_report, write_report
+
+    case = case.expanduser().resolve()
+    report = build_case_report(case)
+    json_path = output.expanduser().resolve() if output else case / "quality_report.json"
+    html_path = html_output.expanduser().resolve() if html_output else case / "quality_report.html"
+    write_report(report, json_path, html_path)
+    typer.echo(f"{report['overall_status']} | {json_path}")
+    if strict and report["overall_status"] == FAIL:
+        raise typer.Exit(code=2)
+
+
+@app.command("repeatability-report")
+def repeatability_report(
+    cases: Annotated[
+        list[Path],
+        typer.Argument(exists=True, file_okay=False, help="Two or more same-subject case folders."),
+    ],
+    subject_id: Annotated[
+        str,
+        typer.Option(help="Pseudonymous subject identifier shared by all supplied cases."),
+    ],
+    output: Annotated[
+        Path,
+        typer.Option("--output", "-o", help="Repeatability JSON destination."),
+    ] = Path("repeatability_report.json"),
+    html_output: Annotated[
+        Path | None,
+        typer.Option("--html-output", help="Optional human-readable HTML destination."),
+    ] = None,
+    surface: Annotated[
+        bool,
+        typer.Option(
+            "--surface/--measurements-only",
+            help="Include rigidly aligned nasal-surface comparisons.",
+        ),
+    ] = True,
+) -> None:
+    """Measure variation across independent scans of the same subject."""
+    if len(cases) < 2:
+        raise typer.BadParameter("Provide at least two independently reconstructed cases")
+    configure_logging()
+    from .report.repeatability import build_repeatability_report, write_repeatability_report
+
+    report = build_repeatability_report(cases, subject_id=subject_id, include_surface=surface)
+    output = output.expanduser().resolve()
+    html_output = html_output.expanduser().resolve() if html_output else None
+    write_repeatability_report(report, output, html_output)
+    typer.echo(f"{report['overall_status']} | {output}")
 
 
 @app.command("download-models")
@@ -125,7 +235,7 @@ def reconstruct(
             help="MediaPipe face_landmarker.task path; obtain it with 'poc download-models'.",
         ),
     ],
-    until: Annotated[str, typer.Option(help=f"Final stage: {', '.join(STAGES)}")] = "measure",
+    until: Annotated[str, typer.Option(help=f"Final stage: {', '.join(STAGES)}")] = "quality",
     resume: Annotated[
         bool, typer.Option(help="Reuse only manifest-verified stage outputs.")
     ] = False,
@@ -180,6 +290,7 @@ def reconstruct(
 
     def ingest_action() -> dict:
         from .pipeline.frames import select_frames
+        from .quality import FAIL, build_capture_report, write_report
 
         capture_summary = loaded_capture.validation_summary or {}
         names = select_frames(
@@ -191,13 +302,30 @@ def reconstruct(
             max_dimension=config.frame_max_dimension,
             rotation=config.rotation,
         )
+        frame_document = json.loads(config.frame_index_path.read_text(encoding="utf-8"))
+        report = build_capture_report(
+            capture_summary,
+            frame_document.get("video_quality"),
+            len(names),
+        )
+        write_report(report, config.capture_quality_path)
+        if report["overall_status"] == FAIL:
+            failed = [
+                check["label"]
+                for section in report["sections"]
+                for check in section["checks"]
+                if check["status"] == FAIL
+            ]
+            raise RuntimeError(
+                "Input capture failed the engineering acceptance profile: " + "; ".join(failed)
+            )
         return {"capture": capture_summary, "selected_images": len(names)}
 
     dependency = _run_stage(
         manifest,
         "ingest",
         ingest_parameters,
-        [config.images_dir, config.frame_index_path],
+        [config.images_dir, config.frame_index_path, config.capture_quality_path],
         ingest_action,
         resume=resume,
     )
@@ -252,6 +380,7 @@ def reconstruct(
             use_gpu=sift_gpu,
             sequential_overlap=config.sequential_overlap,
             matcher=matcher,
+            metrics_path=config.sfm_metrics_path,
         )
         (config.colmap_dir / "selected_sparse_model.txt").write_text(
             str(selected_sparse_model.resolve()), encoding="utf-8"
@@ -262,7 +391,7 @@ def reconstruct(
         manifest,
         "sfm",
         sfm_parameters,
-        [config.colmap_dir / "selected_sparse_model.txt"],
+        [config.colmap_dir / "selected_sparse_model.txt", config.sfm_metrics_path],
         sfm_action,
         dependency_signature=dependency,
         resume=resume,
@@ -345,8 +474,10 @@ def reconstruct(
         from .pipeline.texture import run_texture_mapping
 
         textured_mesh, texture_image = run_texture_mapping(
-            config.dense_dir,
+            config.images_dir,
+            selected_sparse_model,
             config.raw_mesh_path,
+            config.texture_workspace_dir,
             config.texture_dir,
             colmap_binary=config.colmap_binary,
             texture_scale_factor=config.texture_scale_factor,
@@ -362,6 +493,7 @@ def reconstruct(
         {
             "method": "colmap_mesh_texturer",
             "color_correction": True,
+            "source_images": "original_unmasked_registered_frames",
             "texture_scale_factor": config.texture_scale_factor,
         },
         [config.textured_mesh_path, config.texture_image_path],
@@ -430,9 +562,10 @@ def reconstruct(
         manifest,
         "landmarks",
         {
-            "definition": "provisional_mediapipe_surface_landmarks_v2",
+            "definition": "provisional_mediapipe_surface_consensus_landmarks_v3",
             "model_sha256": model_digest,
             "surface_binding": "triangle_index_and_barycentric_coordinates",
+            "localization": "robust_visible_ray_surface_consensus",
         },
         [config.landmarks_path],
         landmarks_action,
@@ -448,7 +581,7 @@ def reconstruct(
         measurements = run_measurements(config.landmarks_path, config.measurements_path)
         return {"measurement_count": len(measurements)}
 
-    _run_stage(
+    dependency = _run_stage(
         manifest,
         "measure",
         {"definition": "provisional_surface_rhinoplasty_measurements_v1"},
@@ -457,10 +590,44 @@ def reconstruct(
         dependency_signature=dependency,
         resume=resume,
     )
+    if stop_index == 8:
+        return
+
+    quality_result: dict[str, Any] = {}
+
+    def quality_action() -> dict:
+        from .quality import build_case_report, write_report
+
+        report = build_case_report(config.output_dir)
+        quality_result.update(report)
+        write_report(report, config.quality_report_path, config.quality_report_html_path)
+        return {
+            "overall_status": report["overall_status"],
+            "profile_id": report["profile_id"],
+            "clinical_use_authorized": report["clinical_use_authorized"],
+        }
+
+    _run_stage(
+        manifest,
+        "quality",
+        {"profile_id": "poc_engineering_v1"},
+        [config.quality_report_path, config.quality_report_html_path],
+        quality_action,
+        dependency_signature=dependency,
+        resume=resume,
+    )
+    report = quality_result or json.loads(config.quality_report_path.read_text(encoding="utf-8"))
+    log_method = logger.error if report["overall_status"] == "FAIL" else logger.info
+    log_method(
+        "Acceptance report | %s | %s",
+        report["overall_status"],
+        config.quality_report_html_path,
+    )
     logger.info(
-        "Pipeline complete | model: %s | measurements: %s",
+        "Pipeline complete | model: %s | measurements: %s | quality: %s",
         config.glb_path,
         config.measurements_path,
+        config.quality_report_path,
     )
 
 

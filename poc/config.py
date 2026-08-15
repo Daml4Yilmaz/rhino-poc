@@ -41,6 +41,10 @@ class ReconstructionConfig:
         return self.output_dir / "frames.json"
 
     @property
+    def capture_quality_path(self) -> Path:
+        return self.output_dir / "capture_quality.json"
+
+    @property
     def masks_dir(self) -> Path:
         return self.output_dir / "masks"
 
@@ -55,6 +59,10 @@ class ReconstructionConfig:
     @property
     def sparse_dir(self) -> Path:
         return self.colmap_dir / "sparse"
+
+    @property
+    def sfm_metrics_path(self) -> Path:
+        return self.output_dir / "sfm.json"
 
     @property
     def dense_dir(self) -> Path:
@@ -81,6 +89,10 @@ class ReconstructionConfig:
         return self.output_dir / "texture"
 
     @property
+    def texture_workspace_dir(self) -> Path:
+        return self.colmap_dir / "texture_workspace"
+
+    @property
     def textured_mesh_path(self) -> Path:
         return self.texture_dir / "mesh.ply"
 
@@ -99,3 +111,11 @@ class ReconstructionConfig:
     @property
     def measurements_path(self) -> Path:
         return self.output_dir / "measurements.json"
+
+    @property
+    def quality_report_path(self) -> Path:
+        return self.output_dir / "quality_report.json"
+
+    @property
+    def quality_report_html_path(self) -> Path:
+        return self.output_dir / "quality_report.html"

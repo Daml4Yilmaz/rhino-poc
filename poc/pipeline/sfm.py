@@ -83,6 +83,7 @@ def run_sfm(
     use_gpu: bool = True,
     sequential_overlap: int = 10,
     matcher: str = "sequential",
+    metrics_path: Path | None = None,
 ) -> Path:
     """Build a sparse model and return the largest connected reconstruction."""
     if colmap_dir.exists():
@@ -201,5 +202,20 @@ def run_sfm(
         raise RuntimeError(
             f"Sparse reconstruction quality gate failed: {registered_count}/{input_count} images "
             f"registered ({registration_ratio:.0%}). Dense reconstruction was not started."
+        )
+    if metrics_path is not None:
+        metrics_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "input_image_count": input_count,
+                    "registered_image_count": registered_count,
+                    "registration_ratio": round(registration_ratio, 6),
+                    "sparse_point_count": reconstruction.num_points3D(),
+                    "selected_model": selected_model.name,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
         )
     return selected_model

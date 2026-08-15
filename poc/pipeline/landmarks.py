@@ -62,6 +62,61 @@ def _robust_triangulation(
     return _closest_point_to_rays(centers[active], directions[active]), active
 
 
+def _robust_surface_consensus(
+    points_m: np.ndarray, minimum_views: int = 6
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Robustly combine per-view surface hits without averaging across outliers."""
+    active = np.ones(len(points_m), dtype=bool)
+    for _ in range(5):
+        if active.sum() < minimum_views:
+            break
+        center = np.median(points_m[active], axis=0)
+        distances = np.linalg.norm(points_m - center, axis=1)
+        active_distances = distances[active]
+        median = float(np.median(active_distances))
+        mad = float(np.median(np.abs(active_distances - median)))
+        threshold = min(0.008, max(0.0025, median + 3.0 * 1.4826 * mad))
+        updated = distances <= threshold
+        if np.array_equal(updated, active):
+            break
+        active = updated
+    if active.sum() < minimum_views:
+        raise RuntimeError(f"Surface consensus retained only {active.sum()} views")
+    consensus = np.mean(points_m[active], axis=0)
+    distances = np.linalg.norm(points_m - consensus, axis=1)
+    return consensus, active, distances
+
+
+def _surface_observations(
+    observations: dict[str, list[tuple[np.ndarray, np.ndarray]]],
+    triangulated_m: dict[str, np.ndarray],
+    mesh_path: Path,
+    scale_mm_per_unit: float,
+) -> dict[str, np.ndarray]:
+    """Intersect landmark rays with the visible authoritative facial surface."""
+    import open3d as o3d
+
+    legacy_mesh = o3d.io.read_triangle_mesh(str(mesh_path))
+    if not len(legacy_mesh.vertices) or not len(legacy_mesh.triangles):
+        raise RuntimeError(f"Cannot raycast an empty mesh: {mesh_path}")
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(legacy_mesh))
+    scale_m_per_unit = scale_mm_per_unit / 1000.0
+    result: dict[str, np.ndarray] = {}
+    for name, landmark_observations in observations.items():
+        centers_m = np.asarray([item[0] for item in landmark_observations]) * scale_m_per_unit
+        directions = np.asarray([item[1] for item in landmark_observations])
+        rays = np.concatenate([centers_m, directions], axis=1).astype(np.float32)
+        raycast = scene.cast_rays(o3d.core.Tensor(rays))
+        distances = raycast["t_hit"].numpy().astype(np.float64)
+        hits = centers_m + directions * distances[:, None]
+        valid = np.isfinite(distances)
+        # Reject accidental intersections with disconnected or back-side geometry.
+        valid &= np.linalg.norm(hits - triangulated_m[name], axis=1) <= 0.025
+        result[name] = hits[valid]
+    return result
+
+
 def _bind_to_surface(
     points_m: dict[str, np.ndarray], mesh_path: Path
 ) -> tuple[dict[str, np.ndarray], dict[str, dict], dict[str, float]]:
@@ -171,19 +226,47 @@ def triangulate_landmarks(
             ),
         }
 
-    geometry = json.loads(geometry_metadata_path.read_text(encoding="utf-8"))
     triangulated_m = {
         name: point * (scale_mm_per_unit / 1000.0) for name, point in triangulated.items()
     }
+    surface_observations = _surface_observations(
+        observations,
+        triangulated_m,
+        authoritative_mesh_path,
+        scale_mm_per_unit,
+    )
+    consensus_m: dict[str, np.ndarray] = {}
+    for name, candidates in surface_observations.items():
+        if len(candidates) < 6:
+            raise RuntimeError(
+                f"Landmark '{name}' intersected the authoritative surface in only "
+                f"{len(candidates)} views"
+            )
+        point, inliers, distances = _robust_surface_consensus(candidates)
+        consensus_m[name] = point
+        quality[name].update(
+            {
+                "surface_hit_count": len(candidates),
+                "surface_consensus_inliers": int(inliers.sum()),
+                "surface_dispersion_median_mm": round(
+                    float(np.median(distances[inliers])) * 1000.0, 3
+                ),
+                "surface_dispersion_p95_mm": round(
+                    float(np.percentile(distances[inliers], 95)) * 1000.0, 3
+                ),
+            }
+        )
+
+    geometry = json.loads(geometry_metadata_path.read_text(encoding="utf-8"))
     snapped, surface_bindings, snap_distances_mm = _bind_to_surface(
-        triangulated_m, authoritative_mesh_path
+        consensus_m, authoritative_mesh_path
     )
     landmarks_mm = {name: (point * 1000.0).round(5).tolist() for name, point in snapped.items()}
     for name, distance_mm in snap_distances_mm.items():
         quality[name]["surface_snap_distance_mm"] = round(distance_mm, 3)
     result = {
         "schema_version": 2,
-        "definition": "provisional_mediapipe_surface_landmarks_v2",
+        "definition": "provisional_mediapipe_surface_consensus_landmarks_v3",
         "geometry_id": geometry["geometry_id"],
         "units": "millimetres",
         "landmarks": landmarks_mm,
@@ -192,7 +275,7 @@ def triangulate_landmarks(
     }
     output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
     get_logger().info(
-        "Landmark triangulation complete | %d landmarks | %d detected views",
+        "Landmark surface consensus complete | %d landmarks | %d detected views",
         len(landmarks_mm),
         detected_images,
     )

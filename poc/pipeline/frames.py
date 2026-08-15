@@ -13,6 +13,7 @@ import numpy as np
 from poc.logging_utils import ProgressReporter, get_logger
 
 from .arkit import ArkitCapture
+from .input_quality import decode_video_quality, summarize_video_quality
 
 ROTATIONS = {"none", "clockwise", "counterclockwise"}
 
@@ -78,30 +79,6 @@ def transform_intrinsics(
     return oriented
 
 
-def _decode_sharpness(video: Path, expected_frames: int) -> np.ndarray:
-    reader = cv2.VideoCapture(str(video))
-    if not reader.isOpened():
-        raise RuntimeError(f"Cannot open RGB video: {video}")
-    scores: list[float] = []
-    progress = ProgressReporter("Decode and score RGB frames", total=expected_frames)
-    while True:
-        ok, frame = reader.read()
-        if not ok:
-            break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (0, 0), fx=0.35, fy=0.35, interpolation=cv2.INTER_AREA)
-        scores.append(float(cv2.Laplacian(gray, cv2.CV_64F).var()))
-        progress.update(len(scores))
-    reader.release()
-    progress.finish(detail=f"decoded {len(scores)} frames")
-    if abs(len(scores) - expected_frames) > 1:
-        raise RuntimeError(
-            f"Decoded RGB frame count ({len(scores)}) does not match capture records "
-            f"({expected_frames})"
-        )
-    return np.asarray(scores, dtype=np.float64)
-
-
 def _select_indices(
     scores: np.ndarray,
     timestamps: np.ndarray,
@@ -139,7 +116,8 @@ def select_frames(
 ) -> list[str]:
     """Decode selected frames and write an explicit pixel transform for each image."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    scores = _decode_sharpness(capture.rgb_path, capture.n_frames)
+    video_quality = decode_video_quality(capture.rgb_path, capture.n_frames)
+    scores = video_quality.sharpness
     usable_count = min(len(scores), capture.n_frames)
     selected = _select_indices(
         scores[:usable_count], capture.timestamps[:usable_count], target_count, minimum_sharpness
@@ -205,6 +183,7 @@ def select_frames(
                 "rotation": rotation,
                 "target_count": target_count,
                 "selected_count": written,
+                "video_quality": summarize_video_quality(video_quality, selected),
                 "images": entries,
             },
             indent=2,
