@@ -877,11 +877,16 @@ def run_poisson_diagnostic(
             )
         _write_report(report, report_path)
 
-        for depth in config.poisson_depths:
+        for depth_index, depth in enumerate(config.poisson_depths):
             depth_key = str(depth)
             report["mesh_results"][depth_key] = {}
             report["artifacts"]["meshes"][depth_key] = {}
-            print(f"Poisson depth {depth}: starting A/B/C/D", flush=True)
+            phase = (
+                "primary production-depth comparison"
+                if depth_index == 0 and depth == config.production_poisson_depth
+                else "depth sweep"
+            )
+            print(f"Poisson depth {depth} ({phase}): starting A/B/C/D", flush=True)
             for key, cloud in variant_clouds.items():
                 definition = VARIANT_DEFINITIONS[key]
                 output_path = (
