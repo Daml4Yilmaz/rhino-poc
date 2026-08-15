@@ -68,8 +68,8 @@ class PoissonDiagnosticConfig:
 
     def validate(self) -> None:
         depths = tuple(dict.fromkeys(self.poisson_depths))
-        if not depths or any(depth not in (7, 8, 9) for depth in depths):
-            raise ValueError("Diagnostic Poisson depths must be selected from 7, 8, and 9")
+        if not depths or any(depth not in (7, 8, 9, 10, 11) for depth in depths):
+            raise ValueError("Diagnostic Poisson depths must be selected from 7 through 11")
         if self.production_poisson_depth not in depths:
             raise ValueError("poisson_depths must include production_poisson_depth")
         if not 0.0 <= self.poisson_trim_percent < 100.0:

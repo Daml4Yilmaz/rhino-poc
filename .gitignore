@@ -21,3 +21,6 @@ HANDOVER_claude_code.md
 *.egg-info/
 build/
 dist/
+
+# Local CUDA COLMAP executable installed for notebooks; never commit the binary.
+/bin/colmap

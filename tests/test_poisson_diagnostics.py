@@ -11,8 +11,8 @@ from poc.diagnostics.poisson import (
 
 
 def test_config_rejects_unrequested_poisson_depth() -> None:
-    with pytest.raises(ValueError, match="7, 8, and 9"):
-        PoissonDiagnosticConfig(poisson_depths=(10,), production_poisson_depth=10).validate()
+    with pytest.raises(ValueError, match="7 through 11"):
+        PoissonDiagnosticConfig(poisson_depths=(12,), production_poisson_depth=12).validate()
 
 
 def test_config_requires_production_depth_in_experiment() -> None:

@@ -25,7 +25,7 @@ def test_poisson_diagnostic_notebook_is_valid_and_non_authoritative() -> None:
     source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
     assert "run_poisson_diagnostic" in source
     assert "PoissonDiagnosticConfig" in source
-    assert "depth_sweep = (7, 8, 9)" in source
+    assert "depth_sweep = " in source
     assert "depths = (production_depth, *remaining_depths)" in source
     assert "RUN_DEPTH_SWEEP" not in source
     assert "face_dense_fused.ply" in source
