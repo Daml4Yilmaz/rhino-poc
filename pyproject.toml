@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26,<3",
     "opencv-contrib-python>=4.9,<5",
     "open3d>=0.18,<1",
+    "scipy>=1.11,<2",
     "trimesh>=4,<5",
     "pycolmap>=3.10,<4.2",
     "pandas>=2,<3",

@@ -171,6 +171,11 @@ or mesh cleanup. It is stored outside the disposable COLMAP workspace and is a r
 output. `mvs.json` records its role, point count, original normals/colors, bounding box, file size,
 SHA-256 digest, and generation stage.
 
+Use `colab_poisson_diagnostics.ipynb` to run the non-authoritative A/B/C/D experiment that isolates
+the effects of COLMAP normals, explicitly recomputed normals, conservative point filtering, and
+Poisson depth. It writes to a dedicated diagnostic subdirectory and never replaces the production
+mesh, authoritative geometry, landmarks, measurements, or case manifest.
+
 ## Capture protocol
 
 - Seat the subject with a supported, still head and neutral closed-mouth expression.

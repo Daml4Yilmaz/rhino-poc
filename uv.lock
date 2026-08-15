@@ -2306,6 +2306,9 @@ dependencies = [
     { name = "pandas" },
     { name = "pillow" },
     { name = "pycolmap" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "trimesh" },
     { name = "typer" },
 ]
@@ -2327,6 +2330,7 @@ requires-dist = [
     { name = "pycolmap", specifier = ">=3.10,<4.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8,<9" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6,<1" },
+    { name = "scipy", specifier = ">=1.11,<2" },
     { name = "trimesh", specifier = ">=4,<5" },
     { name = "typer", specifier = ">=0.12,<1" },
 ]

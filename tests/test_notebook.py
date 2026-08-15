@@ -13,3 +13,18 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert "download-models" in source
     assert "--face-landmarker-model" in source
     assert "--resume" in source
+
+
+def test_poisson_diagnostic_notebook_is_valid_and_non_authoritative() -> None:
+    notebook = json.loads(Path("colab_poisson_diagnostics.ipynb").read_text(encoding="utf-8"))
+    assert notebook["nbformat"] == 4
+    code_cells = [cell for cell in notebook["cells"] if cell["cell_type"] == "code"]
+    assert code_cells
+    assert all(cell.get("execution_count") is None for cell in code_cells)
+    assert all(cell.get("outputs") == [] for cell in code_cells)
+    source = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
+    assert "run_poisson_diagnostic" in source
+    assert "PoissonDiagnosticConfig" in source
+    assert "RUN_DEPTH_SWEEP" in source
+    assert "face_dense_fused.ply" in source
+    assert "non-authoritative" in source.lower()
