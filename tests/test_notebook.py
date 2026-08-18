@@ -13,6 +13,9 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert "download-models" in source
     assert "--face-landmarker-model" in source
     assert "--resume" in source
+    assert "Dorsal Hump Reduction (mm)" in source
+    assert "simulate-dorsal-hump" in source
+    assert "Create simulation" in source
 
 
 def test_poisson_diagnostic_notebook_is_valid_and_non_authoritative() -> None:

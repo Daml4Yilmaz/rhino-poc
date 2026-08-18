@@ -77,11 +77,18 @@ roughness maps are future appearance assets; they must follow the same policies.
 
 ## Surgical deformation
 
-A simulation must deform authoritative vertices once. Landmarks are recomputed from their stored
-triangle and barycentric coordinates. UV-seam render vertices follow their corresponding canonical
-corners, then normals and tangents are recomputed. Measurements are evaluated on the deformed
-authoritative surface. A saved simulation is a new geometry state with its parent `geometry_id`,
-deformation parameters, and deterministic output identity recorded.
+The experimental dorsal-hump operation reads authoritative vertices once and writes a separate
+geometry state. It derives superior–inferior, left–right, and anterior axes from existing nasal
+landmarks, estimates the observed midline dorsal envelope, fits a smooth target through the outer
+dorsal bands, and reduces only positive convex excess. Compact longitudinal, lateral, and
+surface-depth falloffs reach zero at the ROI boundary. It does not displace along vertex normals or
+symmetrize the source face.
+
+The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remain untouched. UV-seam
+render vertices follow their corresponding canonical corners in the simulated GLB. A saved
+simulation records its parent `geometry_id`, its own deterministic output identity, deformation
+parameters, affected vertex count, and explicit non-clinical status. At 0.0 mm, the simulated PLY
+is a byte-for-byte copy of the authoritative PLY.
 
 Topology-changing simulation requires an explicit old-to-new surface correspondence. It must not
 reuse old landmark bindings or measurements without remapping and validation.

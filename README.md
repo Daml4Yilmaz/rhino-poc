@@ -16,8 +16,9 @@ The first milestone is deliberately narrow:
   and tip midline deviation;
 - runtime target: less than one hour on a Google Colab T4 GPU.
 
-FLAME fitting, subcutaneous anatomy, surgical morphing, Gaussian splatting, mobile application
-development, and clinical validation are outside this milestone.
+FLAME fitting, subcutaneous anatomy, predictive surgical biomechanics, Gaussian splatting, mobile
+application development, and clinical validation are outside this milestone. One isolated visual
+operation—experimental dorsal hump reduction—is available without modifying authoritative assets.
 
 ## Why Stray Scanner is required
 
@@ -107,6 +108,16 @@ poc reconstruct /path/to/stray_capture \
   --mvs-source-images 6
 ```
 
+Create an optional dorsal hump reduction simulation after reconstruction:
+
+```bash
+poc simulate-dorsal-hump case_001 --reduction-mm 2.0
+```
+
+The accepted range is 0.0–5.0 mm. This creates separate PLY, GLB, and manifest files and never
+overwrites the authoritative mesh, landmarks, measurements, or geometry metadata. The Colab
+notebook exposes the same operation as a slider and explicit **Create simulation** button.
+
 Use `--resume` only with unchanged inputs and parameters. `case.json` stores the capture
 fingerprint, software version, stage parameters, upstream signatures, status, and timing. A stale
 stage is rejected instead of being silently reused.
@@ -152,7 +163,12 @@ case_001/
 ├── landmarks.json
 ├── measurements.json
 ├── quality_report.json
-└── quality_report.html
+├── quality_report.html
+└── simulations/
+    └── dorsal_hump/
+        ├── reduction_2.0mm.ply
+        ├── reduction_2.0mm.glb
+        └── simulation.json
 ```
 
 `face_geometry.ply` is the authoritative surface in metres. `geometry.json` records its identity,
@@ -160,6 +176,10 @@ topology, visual correspondence, and displacement policy. The GLB contains the s
 surface with a source-image UV texture atlas and non-metallic skin material; UV seams may duplicate render vertices, but render
 triangle indices remain one-to-one with authoritative triangles. Landmark and measurement JSON
 files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Simulation files are explicitly non-authoritative. `simulation.json` records the parent geometry
+ID, requested and actual displacement, affected vertex count, landmark-derived ROI, output paths,
+and a visual-simulation disclaimer.
 
 Geometry reconstruction uses masked images. Texture mapping deliberately rebuilds its workspace
 from the original registered RGB frames, preventing black reconstruction masks from contaminating

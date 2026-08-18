@@ -222,6 +222,51 @@ def download_models(
     typer.echo(str(download_face_landmarker(output_dir)))
 
 
+@app.command("simulate-dorsal-hump")
+def simulate_dorsal_hump(
+    case: Annotated[
+        Path,
+        typer.Argument(exists=True, file_okay=False, help="Completed reconstruction case."),
+    ],
+    reduction_mm: Annotated[
+        float,
+        typer.Option(
+            "--reduction-mm",
+            min=0.0,
+            max=5.0,
+            help="Requested dorsal hump reduction from 0.0 to 5.0 millimetres.",
+        ),
+    ] = 0.0,
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--output-dir",
+            help="Output directory; defaults to CASE/simulations/dorsal_hump.",
+        ),
+    ] = None,
+) -> None:
+    """Create a separate, non-authoritative dorsal hump reduction simulation."""
+    configure_logging()
+    from .simulation.dorsal_hump import simulate_dorsal_hump_reduction
+
+    case = case.expanduser().resolve()
+    destination = (
+        output_dir.expanduser().resolve()
+        if output_dir is not None
+        else case / "simulations" / "dorsal_hump"
+    )
+    source_glb = case / "face_model.glb"
+    manifest = simulate_dorsal_hump_reduction(
+        case / "face_geometry.ply",
+        case / "geometry.json",
+        case / "landmarks.json",
+        destination,
+        reduction_mm=reduction_mm,
+        source_glb_path=source_glb if source_glb.is_file() else None,
+    )
+    typer.echo(json.dumps(manifest, indent=2))
+
+
 @app.command()
 def reconstruct(
     capture: Annotated[Path, typer.Argument(exists=True, file_okay=False)],

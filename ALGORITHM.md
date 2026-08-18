@@ -520,7 +520,41 @@ plane or fit anatomical tangent lines. The output is deliberately labelled
 `provisional_surface_rhinoplasty_measurements_v1`, and its quality section cannot receive clinical
 approval until surgeons define the landmarks, reference planes, and interpretation in writing.
 
-## 13. Quality decision algorithm
+## 13. Experimental dorsal hump reduction simulation
+
+This optional operation is downstream of reconstruction, geometry identity, landmarks, and
+measurements. It never participates in the authoritative pipeline and never overwrites its inputs.
+The only parameter is `reduction_mm` in the closed interval 0.0–5.0 mm.
+
+The simulator builds an orthogonal patient-specific frame from nasion, pronasale, subnasale, and
+the two alar landmarks. The nasion-to-subnasale direction defines the longitudinal axis. The
+pronasale component orthogonal to that axis defines anterior projection, and their cross product is
+aligned with the observed left-to-right alar direction. No facial symmetry is imposed.
+
+Within a narrow midline strip from nasion to an inferred supratip boundary, the existing dorsal
+profile is the smoothed 90th-percentile anterior envelope. A quadratic target is fitted only to the
+proximal and distal profile bands. Positive convex excess above that target is the removable hump;
+non-convex profile regions receive no displacement. The requested amount scales this excess but
+never moves a vertex more than the requested millimetres or farther than the detected hump permits.
+
+Vertices move posteriorly along the landmark-derived sagittal anterior axis—not along their vertex
+normals. Smooth compact falloffs are multiplied across:
+
+- position between nasion and supratip;
+- lateral distance from the patient midline;
+- depth behind the observed dorsal envelope.
+
+Each falloff reaches zero at its boundary. The ROI ends at least 6 mm before the longitudinal tip
+position, while alar width defines a capped dorsal half-width. This protects the tip, columella,
+nostrils, alar rims, upper lip, and cheeks. A 0.0 mm request bypasses deformation and copies the
+authoritative PLY exactly.
+
+Outputs live under `simulations/dorsal_hump/`. `simulation.json` records the source geometry ID,
+simulation geometry ID, requested reduction, maximum persisted displacement, affected vertex
+count, ROI definition and axes, source hashes, and output paths. This is a visual aesthetic
+simulation, not a surgical-outcome prediction.
+
+## 14. Quality decision algorithm
 
 The system does not average unrelated checks into one reassuring score. Every section contains
 individual `PASS`, `WARN`, or `FAIL` checks, and the section and case inherit the worst status:
@@ -549,7 +583,7 @@ A failed capture blocks expensive reconstruction. A later-stage failure preserve
 outputs but leaves `clinical_use_authorized` false. Exact versioned thresholds are documented in
 [QUALITY_ASSURANCE.md](QUALITY_ASSURANCE.md).
 
-## 14. Repeatability algorithm
+## 15. Repeatability algorithm
 
 Repeatability analysis requires at least two independently captured reconstructions of the same
 subject.
@@ -588,7 +622,7 @@ reported as not applied.
 Surface repeatability is still not absolute accuracy. Accuracy needs a trusted physical surface or
 manual reference, not merely agreement between scans produced by the same algorithm.
 
-## 15. Reproducibility, state, and logging
+## 16. Reproducibility, state, and logging
 
 The capture fingerprint hashes metadata and file sizes for the RGB/pose/calibration streams and the
 number and range of depth/confidence files. Each stage signature hashes:
@@ -614,7 +648,7 @@ diagnostics returned by the stage.
 Long-running commands emit structured stage logs, periodic heartbeats, and progress probes. The
 application log and complete raw COLMAP log are retained separately.
 
-## 16. Output contract
+## 17. Output contract
 
 The principal outputs are:
 
@@ -637,8 +671,11 @@ The principal outputs are:
 | `measurements.json` | Six provisional measurements sharing the geometry identity |
 | `quality_report.json` | Machine-readable final acceptance report |
 | `quality_report.html` | Human-readable final acceptance report |
+| `simulations/dorsal_hump/reduction_Xmm.ply` | Separate metric simulated surface |
+| `simulations/dorsal_hump/reduction_Xmm.glb` | Separate simulated visual asset |
+| `simulations/dorsal_hump/simulation.json` | Simulation provenance and displacement report |
 
-## 17. What is not currently implemented
+## 18. What is not currently implemented
 
 The following should not be inferred from the current algorithm:
 
@@ -648,7 +685,7 @@ The following should not be inferred from the current algorithm:
 - pore-level metric geometry or validated displacement reconstruction;
 - normal or measured roughness maps;
 - cartilage, bone, or internal nasal anatomy;
-- surgical simulation or tissue biomechanics;
+- predictive surgery, tissue biomechanics, or simulation operations other than dorsal hump reduction;
 - absolute accuracy against traceable facial ground truth;
 - clinical safety, efficacy, or regulatory validation.
 
