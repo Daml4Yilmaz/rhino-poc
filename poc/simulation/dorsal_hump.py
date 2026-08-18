@@ -140,9 +140,14 @@ def _dorsal_profile(
     profile = _smooth_series(profile)
 
     normalized = (centers - start) / (end - start)
-    boundary = (normalized <= 0.24) | (normalized >= 0.76)
-    target_coefficients = np.polyfit(centers[boundary], profile[boundary], deg=2)
-    target = np.polyval(target_coefficients, centers)
+    proximal_anchor = (normalized >= 0.06) & (normalized <= 0.18)
+    distal_anchor = (normalized >= 0.82) & (normalized <= 0.94)
+    proximal_position = float(np.median(centers[proximal_anchor]))
+    distal_position = float(np.median(centers[distal_anchor]))
+    proximal_height = float(np.median(profile[proximal_anchor]))
+    distal_height = float(np.median(profile[distal_anchor]))
+    target_slope = (distal_height - proximal_height) / (distal_position - proximal_position)
+    target = proximal_height + target_slope * (centers - proximal_position)
     return centers, profile, target
 
 
@@ -234,7 +239,7 @@ def compute_dorsal_hump_deformation(
     )
     roi_metadata["profile_model"] = {
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
-        "target_profile": "quadratic fit to proximal and distal dorsal boundary bands",
+        "target_profile": "straight profile through robust proximal and distal dorsal anchors",
         "convex_hump_only": True,
         "available_hump_height_mm": round(available_hump_mm, 6),
     }
@@ -451,7 +456,7 @@ def simulate_dorsal_hump_reduction(
     manifest["source_file_sha256"] = source_hashes_after
     output_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     get_logger().info(
-        "Dorsal hump simulation | requested %.1f mm | actual %.3f mm | %,d vertices | %s",
+        "Dorsal hump simulation | requested %.1f mm | actual %.3f mm | %d vertices | %s",
         float(reduction_mm),
         manifest["maximum_actual_vertex_displacement_mm"],
         manifest["affected_vertex_count"],

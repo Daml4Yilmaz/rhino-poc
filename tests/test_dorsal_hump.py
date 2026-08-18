@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from poc.logging_utils import configure_logging
 from poc.pipeline.export import export_glb
 from poc.pipeline.geometry import geometry_identity
 from poc.simulation.dorsal_hump import (
@@ -39,6 +40,22 @@ def _synthetic_face() -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
         "right_alare": np.asarray([18.0, 46.0, 8.0]),
     }
     return vertices_mm / 1000.0, np.asarray(faces, dtype=np.int64), landmarks
+
+
+def _synthetic_broad_hump() -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    vertices, _, landmarks = _synthetic_face()
+    vertices_mm = vertices * 1000.0
+    longitudinal = vertices_mm[:, 1]
+    phase = np.clip(longitudinal / 42.0, 0.0, 1.0)
+    broad_hump = 3.2 * np.sin(np.pi * phase) ** 2
+    broad_hump[longitudinal > 42.0] = 0.0
+    vertices_mm[:, 2] = (
+        0.32 * longitudinal
+        + broad_hump
+        - 0.018 * vertices_mm[:, 0] ** 2
+        + 0.35 * (vertices_mm[:, 0] / 16.0)
+    )
+    return vertices_mm / 1000.0, landmarks
 
 
 def _write_mesh(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
@@ -122,9 +139,22 @@ def test_reduction_flattens_only_dorsal_roi_and_preserves_tip() -> None:
     assert simulated_mm[center, 2] < original_mm[center, 2]
 
 
-def test_simulation_outputs_are_separate_and_sources_remain_unchanged(tmp_path: Path) -> None:
+def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
+    vertices, landmarks = _synthetic_broad_hump()
+
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 2.0)
+
+    assert 1.9 <= float(displacement_mm.max()) <= 2.000001
+    assert roi["profile_model"]["available_hump_height_mm"] >= 2.5
+    assert "proximal and distal dorsal anchors" in roi["profile_model"]["target_profile"]
+
+
+def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
+    tmp_path: Path, capsys
+) -> None:
     import open3d as o3d
 
+    configure_logging()
     case, source_vertices, source_faces, _ = _case(tmp_path)
     source_paths = [
         case / "face_geometry.ply",
@@ -156,6 +186,9 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(tmp_path: 
     simulated = o3d.io.read_triangle_mesh(str(output / "reduction_2.0mm.ply"))
     np.testing.assert_array_equal(np.asarray(simulated.triangles), source_faces)
     assert not np.array_equal(np.asarray(simulated.vertices), source_vertices)
+    captured = capsys.readouterr()
+    assert "Logging error" not in captured.err
+    assert f"{manifest['affected_vertex_count']} vertices" in captured.err
 
 
 def test_persisted_zero_reduction_ply_is_byte_identical_to_source(tmp_path: Path) -> None:

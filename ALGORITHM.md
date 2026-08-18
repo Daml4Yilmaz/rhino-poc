@@ -532,8 +532,9 @@ pronasale component orthogonal to that axis defines anterior projection, and the
 aligned with the observed left-to-right alar direction. No facial symmetry is imposed.
 
 Within a narrow midline strip from nasion to an inferred supratip boundary, the existing dorsal
-profile is the smoothed 90th-percentile anterior envelope. A quadratic target is fitted only to the
-proximal and distal profile bands. Positive convex excess above that target is the removable hump;
+profile is the smoothed 90th-percentile anterior envelope. A straight sagittal target joins robust
+median anchors in the proximal and distal profile bands. This prevents a broad hump from being
+absorbed into a flexible target fit. Positive convex excess above that target is the removable hump;
 non-convex profile regions receive no displacement. The requested amount scales this excess but
 never moves a vertex more than the requested millimetres or farther than the detected hump permits.
 
