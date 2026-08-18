@@ -20,6 +20,7 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert 'previous_button.close()' in source
     assert '"--output-dir"' in source
     assert "completed_dorsal_requests" in source
+    assert '"viewer_glb"' in source
 
 
 def test_poisson_diagnostic_notebook_is_valid_and_non_authoritative() -> None:

@@ -89,7 +89,10 @@ The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remai
 render vertices follow their corresponding canonical corners in the simulated GLB. A saved
 simulation records its parent `geometry_id`, its own deterministic output identity, deformation
 parameters, affected vertex count, and explicit non-clinical status. At 0.0 mm, the simulated PLY
-is a byte-for-byte copy of the authoritative PLY.
+is a byte-for-byte copy of the authoritative PLY. Non-zero export is rejected unless the persisted
+PLY hash differs, displacement is meaningfully close to the request, the sagittal profiles separate,
+and the reloaded GLB corners match the simulated authoritative surface. Viewer downloads use the
+simulation geometry hash in the filename to avoid stale-file ambiguity.
 
 Topology-changing simulation requires an explicit old-to-new surface correspondence. It must not
 reuse old landmark bindings or measurements without remapping and validation.

@@ -554,8 +554,11 @@ authoritative PLY exactly.
 
 Outputs live under `simulations/dorsal_hump/`. `simulation.json` records the source geometry ID,
 simulation geometry ID, requested reduction, maximum persisted displacement, affected vertex
-count, ROI definition and axes, source hashes, and output paths. This is a visual aesthetic
-simulation, not a surgical-outcome prediction.
+count, median affected displacement, vertices moved over 0.1 mm, ROI definition and axes, source
+hashes, output hashes, and PLY/GLB persistence checks. An ROI-only colored PLY exposes the selected
+nasal surface. A profile SVG overlays source, target, and simulated sagittal envelopes. The notebook
+downloads a geometry-hash-qualified GLB so external viewers cannot reuse a stale file with the same
+slider label. This is a visual aesthetic simulation, not a surgical-outcome prediction.
 
 ## 14. Quality decision algorithm
 
@@ -676,6 +679,9 @@ The principal outputs are:
 | `quality_report.html` | Human-readable final acceptance report |
 | `simulations/dorsal_hump/reduction_Xmm.ply` | Separate metric simulated surface |
 | `simulations/dorsal_hump/reduction_Xmm.glb` | Separate simulated visual asset |
+| `simulations/dorsal_hump/reduction_Xmm_<hash>.glb` | Cache-safe copy for viewing/downloading |
+| `simulations/dorsal_hump/reduction_Xmm_affected_roi.ply` | Colored nasal ROI diagnostic |
+| `simulations/dorsal_hump/reduction_Xmm_profile.svg` | Source/simulated sagittal profile overlay |
 | `simulations/dorsal_hump/simulation.json` | Simulation provenance and displacement report |
 
 ## 18. What is not currently implemented

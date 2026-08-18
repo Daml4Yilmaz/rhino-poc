@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from poc.logging_utils import configure_logging
+from poc.logging_utils import configure_logging, get_logger
 from poc.pipeline.export import export_glb
 from poc.pipeline.geometry import geometry_identity
 from poc.simulation.dorsal_hump import (
@@ -195,6 +195,9 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
     assert 0.0 < manifest["maximum_actual_vertex_displacement_mm"] <= 2.000001
     assert (output / "reduction_2.0mm.ply").is_file()
     assert (output / "reduction_2.0mm.glb").is_file()
+    assert (output / manifest["output_paths"]["viewer_glb"]).is_file()
+    assert (output / "reduction_2.0mm_affected_roi.ply").is_file()
+    assert (output / "reduction_2.0mm_profile.svg").is_file()
     assert manifest == json.loads((output / "simulation.json").read_text())
     simulated = o3d.io.read_triangle_mesh(str(output / "reduction_2.0mm.ply"))
     np.testing.assert_array_equal(np.asarray(simulated.triangles), source_faces)
@@ -202,6 +205,55 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
     captured = capsys.readouterr()
     assert "Logging error" not in captured.err
     assert f"{manifest['affected_vertex_count']} vertices" in captured.err
+    assert "Dorsal diagnostics | ROI" in captured.err
+    get_logger().handlers.clear()
+
+
+def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path: Path) -> None:
+    import open3d as o3d
+
+    case, source_vertices, _, _ = _case(tmp_path)
+    output = case / "simulations" / "dorsal_hump"
+
+    manifest = simulate_dorsal_hump_reduction(
+        case / "face_geometry.ply",
+        case / "geometry.json",
+        case / "landmarks.json",
+        output,
+        reduction_mm=4.0,
+        source_glb_path=case / "face_model.glb",
+    )
+
+    diagnostics = manifest["diagnostics"]
+    assert diagnostics["requested_reduction_mm"] == 4.0
+    assert diagnostics["mesh_position_units"] == "metres"
+    assert diagnostics["millimetres_to_metres_scale"] == 0.001
+    assert diagnostics["roi_vertex_count"] > 0
+    assert 3.8 <= diagnostics["maximum_displacement_mm"] <= 4.000001
+    assert diagnostics["median_displacement_mm"] > 0.0
+    assert diagnostics["vertices_moved_over_0_1_mm"] > 0
+    assert diagnostics["source_mesh_hash"] != diagnostics["output_mesh_hash"]
+    assert diagnostics["output_geometry_hash_differs_from_source"] is True
+    assert diagnostics["maximum_ply_error_from_memory_mm"] < 1e-6
+    assert diagnostics["maximum_profile_change_mm"] >= 3.0
+    assert diagnostics["glb_export"]["geometry_differs_from_source"] is True
+    assert diagnostics["glb_export"]["maximum_displacement_from_source_mm"] >= 3.8
+
+    simulated = o3d.io.read_triangle_mesh(str(output / manifest["output_paths"]["ply"]))
+    simulated_vertices = np.asarray(simulated.vertices)
+    assert float(np.max(np.linalg.norm(simulated_vertices - source_vertices, axis=1))) >= 0.0038
+
+    roi_mesh = o3d.io.read_triangle_mesh(str(output / manifest["output_paths"]["affected_roi_ply"]))
+    roi_vertices_mm = np.asarray(roi_mesh.vertices) * 1000.0
+    assert 0 < len(roi_vertices_mm) < len(source_vertices)
+    assert np.max(np.abs(roi_vertices_mm[:, 0])) <= 10.1
+    assert np.max(roi_vertices_mm[:, 1]) < 42.0
+
+    profile_svg = (output / manifest["output_paths"]["profile_comparison_svg"]).read_text()
+    assert "red: source | blue: simulation" in profile_svg
+    viewer_glb = output / manifest["output_paths"]["viewer_glb"]
+    assert viewer_glb.is_file()
+    assert manifest["output_file_sha256"]["viewer_glb"] == _sha256(viewer_glb)
 
 
 def test_persisted_zero_reduction_ply_is_byte_identical_to_source(tmp_path: Path) -> None:
@@ -222,3 +274,8 @@ def test_persisted_zero_reduction_ply_is_byte_identical_to_source(tmp_path: Path
     assert manifest["maximum_actual_vertex_displacement_mm"] == 0.0
     assert manifest["affected_vertex_count"] == 0
     assert manifest["simulation_geometry_id"] == manifest["source_geometry_id"]
+    assert manifest["diagnostics"]["maximum_displacement_mm"] == 0.0
+    assert manifest["diagnostics"]["vertices_moved_over_0_1_mm"] == 0
+    assert manifest["diagnostics"]["output_geometry_hash_differs_from_source"] is False
+    assert manifest["diagnostics"]["maximum_profile_change_mm"] == 0.0
+    assert (output / manifest["output_paths"]["affected_roi_ply"]).is_file()

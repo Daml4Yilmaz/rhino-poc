@@ -168,6 +168,9 @@ case_001/
     └── dorsal_hump/
         ├── reduction_2.0mm.ply
         ├── reduction_2.0mm.glb
+        ├── reduction_2.0mm_<geometry-hash>.glb
+        ├── reduction_2.0mm_affected_roi.ply
+        ├── reduction_2.0mm_profile.svg
         └── simulation.json
 ```
 
@@ -179,7 +182,9 @@ files use millimetres and carry the same geometry identity. See [ARCHITECTURE.md
 
 Simulation files are explicitly non-authoritative. `simulation.json` records the parent geometry
 ID, requested and actual displacement, affected vertex count, landmark-derived ROI, output paths,
-and a visual-simulation disclaimer.
+source/output geometry hashes, persisted PLY/GLB checks, and a visual-simulation disclaimer. The
+hash-qualified GLB prevents a viewer from silently reusing an older download with the same slider
+value. The ROI-only PLY and profile SVG make the selected region and profile change inspectable.
 
 Geometry reconstruction uses masked images. Texture mapping deliberately rebuilds its workspace
 from the original registered RGB frames, preventing black reconstruction masks from contaminating
