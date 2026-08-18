@@ -60,6 +60,17 @@ def _synthetic_broad_hump() -> tuple[np.ndarray, dict[str, np.ndarray]]:
     return vertices_mm / 1000.0, landmarks
 
 
+def _synthetic_upper_hump_with_larger_supratip_bulge() -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    vertices, _, landmarks = _synthetic_face(hump_height_mm=0.0)
+    vertices_mm = vertices * 1000.0
+    lateral = vertices_mm[:, 0]
+    longitudinal = vertices_mm[:, 1]
+    upper_hump = 2.7 * np.exp(-0.5 * ((longitudinal - 16.0) / 4.5) ** 2)
+    lower_bulge = 4.0 * np.exp(-0.5 * ((longitudinal - 35.0) / 3.0) ** 2)
+    vertices_mm[:, 2] = 0.32 * longitudinal + upper_hump + lower_bulge - 0.018 * lateral**2
+    return vertices_mm / 1000.0, landmarks
+
+
 def _write_mesh(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     import open3d as o3d
 
@@ -162,6 +173,21 @@ def test_slider_sets_peak_reduction_instead_of_detected_hump_height() -> None:
     assert "slider value defines peak reduction" in roi["profile_model"]["requested_peak_policy"]
 
 
+def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
+    vertices, landmarks = _synthetic_upper_hump_with_larger_supratip_bulge()
+
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0)
+
+    longitudinal_mm = vertices[:, 1] * 1000.0
+    apex = roi["detected_hump_apex"]
+    maximum_vertex_longitudinal_mm = float(longitudinal_mm[np.argmax(displacement_mm)])
+    lower_region = (longitudinal_mm >= 30.0) & (longitudinal_mm <= 39.0)
+    assert 12.0 <= apex["longitudinal_mm_from_nasion"] <= 20.0
+    assert 12.0 <= maximum_vertex_longitudinal_mm <= 20.0
+    assert float(displacement_mm.max()) >= 3.9
+    assert float(displacement_mm[lower_region].max()) < 0.2
+
+
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
     tmp_path: Path, capsys
 ) -> None:
@@ -210,6 +236,7 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
 
 
 def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path: Path) -> None:
+    import cv2
     import open3d as o3d
 
     case, source_vertices, _, _ = _case(tmp_path)
@@ -236,6 +263,11 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert diagnostics["output_geometry_hash_differs_from_source"] is True
     assert diagnostics["maximum_ply_error_from_memory_mm"] < 1e-6
     assert diagnostics["maximum_profile_change_mm"] >= 3.0
+    assert diagnostics["maximum_displacement_distance_from_apex_mm"] < 1.0
+    assert (
+        diagnostics["maximum_supratip_displacement_mm"]
+        < 0.5 * diagnostics["maximum_displacement_mm"]
+    )
     assert diagnostics["glb_export"]["geometry_differs_from_source"] is True
     assert diagnostics["glb_export"]["maximum_displacement_from_source_mm"] >= 3.8
 
@@ -251,6 +283,28 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
 
     profile_svg = (output / manifest["output_paths"]["profile_comparison_svg"]).read_text()
     assert "red: source | blue: simulation" in profile_svg
+    profile_curve = json.loads(
+        (output / manifest["output_paths"]["profile_curve_json"]).read_text()
+    )
+    assert len(profile_curve["source_anterior_mm"]) == 64
+    assert profile_curve["detected_hump_apex"] == diagnostics["detected_hump_apex"]
+    diagnostic_images = {}
+    for key in (
+        "front_before_png",
+        "front_after_png",
+        "profile_before_png",
+        "profile_after_png",
+        "affected_roi_render_png",
+    ):
+        diagnostic_images[key] = cv2.imread(str(output / manifest["output_paths"][key]))
+        assert diagnostic_images[key] is not None
+    assert not np.array_equal(
+        diagnostic_images["profile_before_png"],
+        diagnostic_images["profile_after_png"],
+    )
+    roi_render = diagnostic_images["affected_roi_render_png"]
+    red_highlight = (roi_render[:, :, 2] > 180) & (roi_render[:, :, 1] < 80)
+    assert np.count_nonzero(red_highlight) > 0
     viewer_glb = output / manifest["output_paths"]["viewer_glb"]
     assert viewer_glb.is_file()
     assert manifest["output_file_sha256"]["viewer_glb"] == _sha256(viewer_glb)

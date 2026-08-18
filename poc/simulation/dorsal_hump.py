@@ -156,6 +156,11 @@ def _smooth_compact_falloff(normalized_distance: np.ndarray) -> np.ndarray:
     return inside * inside * (3.0 - 2.0 * inside)
 
 
+def _smoothstep01(value: np.ndarray) -> np.ndarray:
+    clipped = np.clip(value, 0.0, 1.0)
+    return clipped * clipped * (3.0 - 2.0 * clipped)
+
+
 def _compute_dorsal_hump_deformation(
     vertices_m: np.ndarray,
     landmarks_mm: dict[str, np.ndarray],
@@ -207,13 +212,30 @@ def _compute_dorsal_hump_deformation(
     start = float(frame["roi_start_mm"])
     end = float(frame["roi_end_mm"])
     normalized_centers = (centers - start) / (end - start)
-    boundary_falloff = np.sin(np.pi * normalized_centers) ** 2
-    convex_excess = np.maximum(profile - target, 0.0) * boundary_falloff
-    available_hump_mm = float(np.max(convex_excess))
-    if reduction_mm == 0.0 or available_hump_mm <= 1e-6:
+    convex_excess = np.maximum(profile - target, 0.0)
+    apex_search = (normalized_centers >= 0.08) & (normalized_centers <= 0.72)
+    apex_candidates = np.flatnonzero(apex_search)
+    apex_index = int(apex_candidates[np.argmax(convex_excess[apex_search])])
+    available_hump_mm = float(convex_excess[apex_index])
+    apex_normalized = float(normalized_centers[apex_index])
+    if reduction_mm > 0.0 and available_hump_mm <= 1e-6:
+        raise RuntimeError("No positive upper/mid-dorsal convexity was found for hump reduction")
+    if reduction_mm == 0.0:
         centerline_reduction = np.zeros_like(convex_excess)
     else:
-        centerline_reduction = reduction_mm * (convex_excess / available_hump_mm)
+        proximal_boundary = _smoothstep01(normalized_centers / apex_normalized)
+        distal_boundary = _smoothstep01((1.0 - normalized_centers) / (1.0 - apex_normalized))
+        boundary_falloff = np.where(
+            normalized_centers <= apex_normalized,
+            proximal_boundary,
+            distal_boundary,
+        )
+        apex_sigma = 0.18
+        apex_falloff = np.exp(-0.5 * ((normalized_centers - apex_normalized) / apex_sigma) ** 2)
+        convexity_weight = 0.2 + 0.8 * np.clip(convex_excess / available_hump_mm, 0.0, 1.0)
+        centerline_shape = boundary_falloff * apex_falloff * convexity_weight
+        centerline_shape /= centerline_shape[apex_index]
+        centerline_reduction = reduction_mm * centerline_shape
 
     profile_at_vertex = np.interp(longitudinal, centers, profile)
     reduction_at_vertex = np.interp(
@@ -249,8 +271,25 @@ def _compute_dorsal_hump_deformation(
             "algorithmic convex excess above the simulation target profile"
         ),
         "requested_peak_policy": (
-            "detected convex hump defines spatial weights; slider value defines peak reduction"
+            "detected upper/mid-dorsal apex defines the deformation center; slider value defines "
+            "peak reduction"
         ),
+    }
+    apex_point_mm = (
+        np.asarray(frame["origin"])
+        + centers[apex_index] * np.asarray(frame["vertical"])
+        + profile[apex_index] * np.asarray(frame["anterior"])
+    )
+    roi_metadata["detected_hump_apex"] = {
+        "profile_bin_index": apex_index,
+        "normalized_nasion_to_supratip": round(apex_normalized, 6),
+        "longitudinal_mm_from_nasion": round(float(centers[apex_index]), 6),
+        "source_anterior_mm": round(float(profile[apex_index]), 6),
+        "target_anterior_mm": round(float(target[apex_index]), 6),
+        "outward_convexity_mm": round(available_hump_mm, 6),
+        "world_position_mm": apex_point_mm.round(6).tolist(),
+        "search_band_normalized": [0.08, 0.72],
+        "is_clinical_measurement": False,
     }
     roi_metadata["candidate_vertex_count"] = int(np.count_nonzero(roi_vertex_mask))
     simulated_anterior = anterior - displacement_mm
@@ -362,6 +401,183 @@ def _write_profile_svg(output_path: Path, profile: dict[str, np.ndarray]) -> flo
 """
     output_path.write_text(svg, encoding="utf-8")
     return maximum_profile_change_mm
+
+
+def _projection_image(
+    horizontal: np.ndarray,
+    vertical: np.ndarray,
+    depth: np.ndarray,
+    *,
+    title: str,
+    horizontal_label: str,
+    vertical_label: str,
+    vertical_increases_down: bool,
+    highlight_mask: np.ndarray | None = None,
+    bounds: tuple[float, float, float, float] | None = None,
+) -> tuple[np.ndarray, tuple[float, float, float, float]]:
+    import cv2
+
+    height = 900
+    width = 900
+    margin = 65
+    if bounds is None:
+        x_min, x_max = np.percentile(horizontal, [0.5, 99.5])
+        y_min, y_max = np.percentile(vertical, [0.5, 99.5])
+        x_padding = max(0.04 * float(x_max - x_min), 1e-6)
+        y_padding = max(0.04 * float(y_max - y_min), 1e-6)
+        bounds = (
+            float(x_min - x_padding),
+            float(x_max + x_padding),
+            float(y_min - y_padding),
+            float(y_max + y_padding),
+        )
+    x_min, x_max, y_min, y_max = bounds
+    x_span = max(x_max - x_min, 1e-9)
+    y_span = max(y_max - y_min, 1e-9)
+    px = np.rint(margin + (horizontal - x_min) / x_span * (width - 2 * margin)).astype(int)
+    vertical_fraction = (vertical - y_min) / y_span
+    if not vertical_increases_down:
+        vertical_fraction = 1.0 - vertical_fraction
+    py = np.rint(margin + vertical_fraction * (height - 2 * margin)).astype(int)
+    valid = (px >= margin) & (px < width - margin) & (py >= margin) & (py < height - margin)
+
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    depth_min, depth_max = np.percentile(depth[valid], [2.0, 98.0])
+    depth_span = max(float(depth_max - depth_min), 1e-9)
+    shade = 195.0 - 130.0 * np.clip((depth - depth_min) / depth_span, 0.0, 1.0)
+    order = np.argsort(depth[valid], kind="stable")
+    valid_indices = np.flatnonzero(valid)[order]
+    gray = shade[valid_indices].astype(np.uint8)
+    canvas[py[valid_indices], px[valid_indices]] = np.column_stack([gray, gray, gray])
+    canvas = cv2.erode(canvas, np.ones((2, 2), dtype=np.uint8), iterations=1)
+
+    if highlight_mask is not None:
+        highlighted = valid & highlight_mask
+        overlay = np.zeros((height, width), dtype=np.uint8)
+        overlay[py[highlighted], px[highlighted]] = 255
+        overlay = cv2.dilate(overlay, np.ones((5, 5), dtype=np.uint8), iterations=1)
+        canvas[overlay > 0] = (35, 35, 225)
+
+    cv2.rectangle(canvas, (margin, margin), (width - margin, height - margin), (60, 60, 60), 1)
+    cv2.putText(canvas, title, (margin, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (20, 20, 20), 2)
+    cv2.putText(
+        canvas,
+        horizontal_label,
+        (width // 2 - 120, height - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (20, 20, 20),
+        1,
+    )
+    cv2.putText(
+        canvas,
+        vertical_label,
+        (8, height // 2),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.45,
+        (20, 20, 20),
+        1,
+    )
+    return canvas, bounds
+
+
+def _write_diagnostic_renders(
+    output_dir: Path,
+    label: str,
+    source_vertices_m: np.ndarray,
+    simulated_vertices_m: np.ndarray,
+    frame: dict[str, Any],
+    affected_vertex_mask: np.ndarray,
+) -> dict[str, Path]:
+    import cv2
+
+    source_longitudinal, source_lateral, source_anterior = _coordinates(
+        source_vertices_m * 1000.0,
+        frame,
+    )
+    simulated_longitudinal, simulated_lateral, simulated_anterior = _coordinates(
+        simulated_vertices_m * 1000.0,
+        frame,
+    )
+    front_before, front_bounds = _projection_image(
+        source_lateral,
+        source_longitudinal,
+        source_anterior,
+        title="Front view - source",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+    )
+    front_after, _ = _projection_image(
+        simulated_lateral,
+        simulated_longitudinal,
+        simulated_anterior,
+        title="Front view - simulated",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        bounds=front_bounds,
+    )
+    profile_before, profile_bounds = _projection_image(
+        source_longitudinal,
+        source_anterior,
+        -np.abs(source_lateral),
+        title="Profile view - source",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+    )
+    profile_after, _ = _projection_image(
+        simulated_longitudinal,
+        simulated_anterior,
+        -np.abs(simulated_lateral),
+        title="Profile view - simulated",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        bounds=profile_bounds,
+    )
+    highlighted_front, _ = _projection_image(
+        source_lateral,
+        source_longitudinal,
+        source_anterior,
+        title="Affected dorsal ROI - front/profile",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        highlight_mask=affected_vertex_mask,
+        bounds=front_bounds,
+    )
+    highlighted_profile, _ = _projection_image(
+        source_longitudinal,
+        source_anterior,
+        -np.abs(source_lateral),
+        title="Affected dorsal ROI - profile",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        highlight_mask=affected_vertex_mask,
+        bounds=profile_bounds,
+    )
+    roi_highlight = np.concatenate([highlighted_front, highlighted_profile], axis=1)
+    paths = {
+        "front_before_png": output_dir / f"reduction_{label}mm_front_before.png",
+        "front_after_png": output_dir / f"reduction_{label}mm_front_after.png",
+        "profile_before_png": output_dir / f"reduction_{label}mm_profile_before.png",
+        "profile_after_png": output_dir / f"reduction_{label}mm_profile_after.png",
+        "affected_roi_render_png": output_dir / f"reduction_{label}mm_affected_roi.png",
+    }
+    images = {
+        "front_before_png": front_before,
+        "front_after_png": front_after,
+        "profile_before_png": profile_before,
+        "profile_after_png": profile_after,
+        "affected_roi_render_png": roi_highlight,
+    }
+    for name, path in paths.items():
+        if not cv2.imwrite(str(path), images[name]):
+            raise RuntimeError(f"Failed to write simulation diagnostic render: {path}")
+    return paths
 
 
 def _export_simulation_glb(
@@ -526,6 +742,7 @@ def simulate_dorsal_hump_reduction(
     output_glb = output_dir / f"reduction_{label}mm.glb"
     output_roi_ply = output_dir / f"reduction_{label}mm_affected_roi.ply"
     output_profile_svg = output_dir / f"reduction_{label}mm_profile.svg"
+    output_profile_json = output_dir / f"reduction_{label}mm_profile.json"
     output_manifest = output_dir / "simulation.json"
     if float(reduction_mm) == 0.0:
         shutil.copy2(authoritative_mesh_path, output_ply)
@@ -566,6 +783,42 @@ def simulate_dorsal_hump_reduction(
     roi_metadata["exported_diagnostic_vertex_count"] = roi_export["vertex_count"]
     roi_metadata["exported_diagnostic_triangle_count"] = roi_export["triangle_count"]
     maximum_profile_change_mm = _write_profile_svg(output_profile_svg, profile_diagnostic)
+    output_profile_json.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "units": "millimetres",
+                "detected_hump_apex": roi_metadata["detected_hump_apex"],
+                **{
+                    name: np.asarray(values).round(6).tolist()
+                    for name, values in profile_diagnostic.items()
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    frame = _anatomical_frame(landmarks_mm)
+    source_longitudinal, _, _ = _coordinates(vertices_m * 1000.0, frame)
+    maximum_displacement_vertex = int(np.argmax(persisted_displacement_mm))
+    maximum_displacement_longitudinal_mm = float(source_longitudinal[maximum_displacement_vertex])
+    apex_longitudinal_mm = float(roi_metadata["detected_hump_apex"]["longitudinal_mm_from_nasion"])
+    maximum_to_apex_distance_mm = abs(maximum_displacement_longitudinal_mm - apex_longitudinal_mm)
+    normalized_vertex_longitudinal = (source_longitudinal - float(frame["roi_start_mm"])) / (
+        float(frame["roi_end_mm"]) - float(frame["roi_start_mm"])
+    )
+    supratip_mask = roi_vertex_mask & (normalized_vertex_longitudinal >= 0.78)
+    maximum_supratip_displacement_mm = (
+        float(np.max(persisted_displacement_mm[supratip_mask])) if np.any(supratip_mask) else 0.0
+    )
+    render_paths = _write_diagnostic_renders(
+        output_dir,
+        label,
+        vertices_m,
+        persisted_vertices_m,
+        frame,
+        persisted_displacement_mm > 0.1,
+    )
 
     if float(reduction_mm) == 0.0:
         if maximum_displacement_mm != 0.0 or geometry_hash_changed:
@@ -582,6 +835,12 @@ def simulate_dorsal_hump_reduction(
         if maximum_profile_change_mm < 0.5 * float(reduction_mm):
             raise RuntimeError(
                 "The simulated dorsal profile did not visibly separate from the source profile"
+            )
+        if maximum_to_apex_distance_mm > 0.12 * float(frame["roi_end_mm"]):
+            raise RuntimeError("Maximum displacement is not centered on the detected hump apex")
+        if maximum_supratip_displacement_mm > 0.5 * maximum_displacement_mm:
+            raise RuntimeError(
+                "The supratip is receiving excessive displacement relative to the hump"
             )
 
     short_geometry_id = simulation_identity["geometry_id"].split(":", 1)[-1][:12]
@@ -627,6 +886,12 @@ def simulate_dorsal_hump_reduction(
             "maximum_in_memory_displacement_mm": round(float(np.max(displacement_mm)), 6),
             "maximum_ply_error_from_memory_mm": round(float(np.max(persistence_error_mm)), 9),
             "maximum_profile_change_mm": round(maximum_profile_change_mm, 6),
+            "detected_hump_apex": roi_metadata["detected_hump_apex"],
+            "maximum_displacement_longitudinal_mm_from_nasion": round(
+                maximum_displacement_longitudinal_mm, 6
+            ),
+            "maximum_displacement_distance_from_apex_mm": round(maximum_to_apex_distance_mm, 6),
+            "maximum_supratip_displacement_mm": round(maximum_supratip_displacement_mm, 6),
         },
         "output_paths": {
             "ply": output_ply.name,
@@ -634,6 +899,8 @@ def simulate_dorsal_hump_reduction(
             "viewer_glb": viewer_glb.name,
             "affected_roi_ply": output_roi_ply.name,
             "profile_comparison_svg": output_profile_svg.name,
+            "profile_curve_json": output_profile_json.name,
+            **{name: path.name for name, path in render_paths.items()},
             "manifest": output_manifest.name,
         },
         "output_directory_at_generation": str(output_dir.resolve()),
@@ -662,6 +929,8 @@ def simulate_dorsal_hump_reduction(
         "viewer_glb": _sha256_file(viewer_glb),
         "affected_roi_ply": _sha256_file(output_roi_ply),
         "profile_comparison_svg": _sha256_file(output_profile_svg),
+        "profile_curve_json": _sha256_file(output_profile_json),
+        **{name: _sha256_file(path) for name, path in render_paths.items()},
     }
     output_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     get_logger().info(
@@ -677,5 +946,12 @@ def simulate_dorsal_hump_reduction(
         manifest["diagnostics"]["median_displacement_mm"],
         manifest["diagnostics"]["vertices_moved_over_0_1_mm"],
         manifest["diagnostics"]["output_geometry_hash_differs_from_source"],
+    )
+    apex = manifest["diagnostics"]["detected_hump_apex"]
+    get_logger().info(
+        "Dorsal hump apex | %.3f mm from nasion | normalized %.3f | convexity %.3f mm",
+        apex["longitudinal_mm_from_nasion"],
+        apex["normalized_nasion_to_supratip"],
+        apex["outward_convexity_mm"],
     )
     return manifest

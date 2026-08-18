@@ -535,10 +535,13 @@ Within a narrow midline strip from nasion to an inferred supratip boundary, the 
 profile is the smoothed 90th-percentile anterior envelope. A straight sagittal target joins robust
 median anchors in the proximal and distal profile bands. This prevents a broad hump from being
 absorbed into a flexible target fit. Positive convex excess above that target is the removable hump;
-non-convex profile regions receive no displacement. The positive excess is normalized into a smooth
-spatial weighting function, and the requested slider amount sets its peak displacement. No vertex
-moves more than the requested millimetres. The reported available hump height is only the
-algorithmic excess above this constructed target; it is not an anatomical or clinical measurement.
+non-convex profile regions receive no displacement. The apex is the maximum raw outward excess in
+the upper/mid-dorsal search band (normalized 0.08–0.72 from nasion to supratip). An apex-centered
+Gaussian and monotone piecewise boundary falloff make that point the unique displacement maximum;
+secondary lower-dorsum or supratip deviations cannot become the reduction center. The requested
+slider amount sets the apex displacement, and no vertex moves more than that amount. The reported
+available hump height is only the algorithmic excess above this constructed target; it is not an
+anatomical or clinical measurement.
 
 Vertices move posteriorly along the landmark-derived sagittal anterior axis—not along their vertex
 normals. Smooth compact falloffs are multiplied across:
@@ -557,8 +560,10 @@ simulation geometry ID, requested reduction, maximum persisted displacement, aff
 count, median affected displacement, vertices moved over 0.1 mm, ROI definition and axes, source
 hashes, output hashes, and PLY/GLB persistence checks. An ROI-only colored PLY exposes the selected
 nasal surface. A profile SVG overlays source, target, and simulated sagittal envelopes. The notebook
-downloads a geometry-hash-qualified GLB so external viewers cannot reuse a stale file with the same
-slider label. This is a visual aesthetic simulation, not a surgical-outcome prediction.
+also persists the numerical profile curve, front/profile before-and-after PNG renders, and a
+front/profile ROI-highlight render. It downloads a geometry-hash-qualified GLB so external viewers
+cannot reuse a stale file with the same slider label. This is a visual aesthetic simulation, not a
+surgical-outcome prediction.
 
 ## 14. Quality decision algorithm
 
@@ -682,6 +687,9 @@ The principal outputs are:
 | `simulations/dorsal_hump/reduction_Xmm_<hash>.glb` | Cache-safe copy for viewing/downloading |
 | `simulations/dorsal_hump/reduction_Xmm_affected_roi.ply` | Colored nasal ROI diagnostic |
 | `simulations/dorsal_hump/reduction_Xmm_profile.svg` | Source/simulated sagittal profile overlay |
+| `simulations/dorsal_hump/reduction_Xmm_profile.json` | Numerical source/target/simulated curves and apex |
+| `simulations/dorsal_hump/reduction_Xmm_{front,profile}_{before,after}.png` | Orthographic diagnostic renders |
+| `simulations/dorsal_hump/reduction_Xmm_affected_roi.png` | Front/profile ROI-highlight render |
 | `simulations/dorsal_hump/simulation.json` | Simulation provenance and displacement report |
 
 ## 18. What is not currently implemented
