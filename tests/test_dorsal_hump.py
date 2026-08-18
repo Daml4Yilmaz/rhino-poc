@@ -13,12 +13,14 @@ from poc.simulation.dorsal_hump import (
 )
 
 
-def _synthetic_face() -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+def _synthetic_face(
+    hump_height_mm: float = 3.2,
+) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
     lateral = np.linspace(-16.0, 16.0, 17)
     longitudinal = np.linspace(0.0, 60.0, 61)
     xx, yy = np.meshgrid(lateral, longitudinal)
     baseline = 0.32 * yy
-    hump = 3.2 * np.exp(-0.5 * ((yy - 22.0) / 6.0) ** 2)
+    hump = hump_height_mm * np.exp(-0.5 * ((yy - 22.0) / 6.0) ** 2)
     asymmetry = 0.35 * (xx / 16.0)
     zz = baseline + hump - 0.018 * xx**2 + asymmetry
     vertices_mm = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
@@ -147,6 +149,17 @@ def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
     assert 1.9 <= float(displacement_mm.max()) <= 2.000001
     assert roi["profile_model"]["available_hump_height_mm"] >= 2.5
     assert "proximal and distal dorsal anchors" in roi["profile_model"]["target_profile"]
+
+
+def test_slider_sets_peak_reduction_instead_of_detected_hump_height() -> None:
+    vertices, _, landmarks = _synthetic_face(hump_height_mm=0.5)
+
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 5.0)
+
+    assert roi["profile_model"]["available_hump_height_mm"] < 1.0
+    assert roi["profile_model"]["available_hump_height_is_clinical_measurement"] is False
+    assert 4.8 <= float(displacement_mm.max()) <= 5.000001
+    assert "slider value defines peak reduction" in roi["profile_model"]["requested_peak_policy"]
 
 
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(

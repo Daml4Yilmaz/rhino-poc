@@ -80,9 +80,10 @@ roughness maps are future appearance assets; they must follow the same policies.
 The experimental dorsal-hump operation reads authoritative vertices once and writes a separate
 geometry state. It derives superior–inferior, left–right, and anterior axes from existing nasal
 landmarks, estimates the observed midline dorsal envelope, fits a smooth target through the outer
-dorsal bands, and reduces only positive convex excess. Compact longitudinal, lateral, and
-surface-depth falloffs reach zero at the ROI boundary. It does not displace along vertex normals or
-symmetrize the source face.
+dorsal bands, and uses only positive convex excess to localize the hump. The normalized hump weight
+sets the deformation shape while the slider sets its peak displacement. Compact longitudinal,
+lateral, and surface-depth falloffs reach zero at the ROI boundary. It does not displace along vertex
+normals or symmetrize the source face.
 
 The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remain untouched. UV-seam
 render vertices follow their corresponding canonical corners in the simulated GLB. A saved

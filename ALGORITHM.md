@@ -535,8 +535,10 @@ Within a narrow midline strip from nasion to an inferred supratip boundary, the 
 profile is the smoothed 90th-percentile anterior envelope. A straight sagittal target joins robust
 median anchors in the proximal and distal profile bands. This prevents a broad hump from being
 absorbed into a flexible target fit. Positive convex excess above that target is the removable hump;
-non-convex profile regions receive no displacement. The requested amount scales this excess but
-never moves a vertex more than the requested millimetres or farther than the detected hump permits.
+non-convex profile regions receive no displacement. The positive excess is normalized into a smooth
+spatial weighting function, and the requested slider amount sets its peak displacement. No vertex
+moves more than the requested millimetres. The reported available hump height is only the
+algorithmic excess above this constructed target; it is not an anatomical or clinical measurement.
 
 Vertices move posteriorly along the landmark-derived sagittal anterior axis—not along their vertex
 normals. Smooth compact falloffs are multiplied across:

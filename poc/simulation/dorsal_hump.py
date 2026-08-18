@@ -216,7 +216,7 @@ def compute_dorsal_hump_deformation(
     if available_hump_mm <= 1e-6:
         centerline_reduction = np.zeros_like(convex_excess)
     else:
-        centerline_reduction = convex_excess * min(reduction_mm / available_hump_mm, 1.0)
+        centerline_reduction = reduction_mm * (convex_excess / available_hump_mm)
 
     profile_at_vertex = np.interp(longitudinal, centers, profile)
     reduction_at_vertex = np.interp(
@@ -242,6 +242,13 @@ def compute_dorsal_hump_deformation(
         "target_profile": "straight profile through robust proximal and distal dorsal anchors",
         "convex_hump_only": True,
         "available_hump_height_mm": round(available_hump_mm, 6),
+        "available_hump_height_is_clinical_measurement": False,
+        "available_hump_height_interpretation": (
+            "algorithmic convex excess above the simulation target profile"
+        ),
+        "requested_peak_policy": (
+            "detected convex hump defines spatial weights; slider value defines peak reduction"
+        ),
     }
     return simulated, displacement_mm, roi_metadata
 
