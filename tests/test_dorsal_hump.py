@@ -16,7 +16,7 @@ from poc.simulation.dorsal_hump import (
 def _synthetic_face(
     hump_height_mm: float = 3.2,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    lateral = np.linspace(-16.0, 16.0, 17)
+    lateral = np.linspace(-24.0, 24.0, 25)
     longitudinal = np.linspace(0.0, 60.0, 61)
     xx, yy = np.meshgrid(lateral, longitudinal)
     baseline = 0.32 * yy
@@ -149,7 +149,10 @@ def test_reduction_flattens_only_dorsal_roi_and_preserves_tip() -> None:
 
     assert 1.8 <= float(displacement_mm.max()) <= 2.000001
     assert np.count_nonzero(displacement_mm) > 0
-    np.testing.assert_allclose(simulated_mm[:, :2], original_mm[:, :2], atol=1e-12)
+    np.testing.assert_allclose(simulated_mm[:, 1], original_mm[:, 1], atol=1e-12)
+    lateral_motion = simulated_mm[:, 0] - original_mm[:, 0]
+    assert float(np.max(np.abs(lateral_motion))) <= 0.61
+    assert np.all(original_mm[:, 0] * lateral_motion <= 1e-10)
     assert np.all(displacement_mm[original_mm[:, 1] >= 42.0] == 0.0)
     assert np.all(displacement_mm[np.abs(original_mm[:, 0]) >= roi["lateral_half_width_mm"]] == 0.0)
     center = np.argmin(np.abs(original_mm[:, 0]) + np.abs(original_mm[:, 1] - 22.0))
@@ -202,7 +205,7 @@ def test_connected_profile_vertex_is_not_left_fixed_by_pointwise_clipping() -> N
     _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0, faces)
 
     assert roi["pointwise_envelope_clipping"] is False
-    assert roi["deformation_solver"]["method"] == "biharmonic_laplacian_scalar_field"
+    assert roi["deformation_solver"]["method"] == "biharmonic_laplacian_3d_dorsal_field"
     assert displacement_mm[depressed] > 3.5
 
 
@@ -221,10 +224,37 @@ def test_profile_correction_is_continuous_without_a_scooped_section() -> None:
     assert np.max(np.abs(np.diff(active_values))) < 0.45
     assert np.max(np.abs(np.diff(active_values, n=2))) < 0.12
     solver = roi["deformation_solver"]
-    assert solver["profile_constraint_vertex_count"] > 0
+    assert solver["dorsal_cross_section_constraint_vertex_count"] > 0
     assert solver["fixed_boundary_vertex_count"] > 0
-    assert solver["p95_neighbor_displacement_change_mm"] < 1.0
-    assert solver["maximum_neighbor_displacement_change_mm"] < 1.1
+    assert solver["p95_neighbor_displacement_change_mm"] < 1.1
+    assert solver["maximum_neighbor_displacement_change_mm"] < 1.8
+
+
+def test_hump_cross_section_remains_convex_and_blends_into_sidewalls() -> None:
+    vertices, faces, landmarks = _synthetic_face()
+
+    simulated, displacement_mm, roi = compute_dorsal_hump_deformation(
+        vertices, landmarks, 4.0, faces
+    )
+
+    source_mm = vertices * 1000.0
+    simulated_mm = simulated * 1000.0
+    hump_level = np.abs(source_mm[:, 1] - 22.0) < 0.1
+    lateral = simulated_mm[hump_level, 0]
+    anterior = simulated_mm[hump_level, 2]
+    center = np.abs(lateral) <= 0.1
+    central_bridge = np.abs(lateral) <= 6.0
+    sidewall = (np.abs(lateral) >= 10.0) & (np.abs(lateral) <= 18.0)
+    curvature = float(np.polyfit(lateral[central_bridge], anterior[central_bridge], 2)[0])
+
+    assert curvature < -0.015
+    assert float(np.min(anterior[center])) > float(np.max(anterior[sidewall])) + 1.5
+    source_sidewall = (
+        hump_level & (np.abs(source_mm[:, 0]) >= 6.0) & (np.abs(source_mm[:, 0]) <= 10.0)
+    )
+    assert float(np.min(displacement_mm[source_sidewall])) > 3.5
+    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] > 0.1
+    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] <= 0.6
 
 
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
@@ -305,13 +335,19 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert diagnostics["output_geometry_hash_differs_from_source"] is True
     assert diagnostics["maximum_ply_error_from_memory_mm"] < 1e-6
     assert diagnostics["maximum_profile_change_mm"] >= 3.0
-    assert diagnostics["maximum_displacement_distance_from_apex_mm"] < 1.0
+    assert diagnostics["maximum_displacement_distance_from_apex_mm"] < 1.5
     assert (
         diagnostics["maximum_supratip_displacement_mm"]
         < 0.5 * diagnostics["maximum_displacement_mm"]
     )
     assert diagnostics["glb_export"]["geometry_differs_from_source"] is True
     assert diagnostics["glb_export"]["maximum_displacement_from_source_mm"] >= 3.8
+    assert diagnostics["glb_export"]["normals_recomputed_from_simulated_geometry"] is True
+    assert diagnostics["glb_export"]["maximum_normal_error_degrees"] < 6.0
+    assert diagnostics["glb_export"]["p95_normal_error_degrees"] < 1.0
+    assert diagnostics["ply_normals"]["present"] is True
+    assert diagnostics["ply_normals"]["recomputed_from_simulated_geometry"] is True
+    assert diagnostics["ply_normals"]["maximum_error_degrees"] < 0.01
 
     simulated = o3d.io.read_triangle_mesh(str(output / manifest["output_paths"]["ply"]))
     simulated_vertices = np.asarray(simulated.vertices)
@@ -332,6 +368,26 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     )
     assert len(profile_curve["source_anterior_mm"]) == 64
     assert profile_curve["detected_hump_apex"] == diagnostics["detected_hump_apex"]
+    cross_sections = json.loads(
+        (output / manifest["output_paths"]["cross_sections_json"]).read_text()
+    )
+    assert set(cross_sections["sections"]) == {
+        "radix_upper_dorsum",
+        "hump_region",
+        "mid_dorsum",
+        "supratip",
+    }
+    for name, section in cross_sections["sections"].items():
+        assert len(section["source_lateral_mm"]) == 49
+        assert len(section["simulated_lateral_mm"]) == 49
+        if name in {"hump_region", "mid_dorsum"}:
+            width_ratio = (
+                section["simulated_width_at_1_5mm_depth_mm"]
+                / section["source_width_at_1_5mm_depth_mm"]
+            )
+            assert 0.7 <= width_ratio <= 1.05
+            assert section["simulated_central_quadratic_curvature_per_mm"] < -0.01
+    assert (output / manifest["output_paths"]["cross_sections_svg"]).is_file()
     diagnostic_images = {}
     for key in (
         "front_before_png",
@@ -339,6 +395,10 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
         "profile_before_png",
         "profile_after_png",
         "affected_roi_render_png",
+        "clay_before_png",
+        "clay_after_png",
+        "normal_before_png",
+        "normal_after_png",
     ):
         diagnostic_images[key] = cv2.imread(str(output / manifest["output_paths"][key]))
         assert diagnostic_images[key] is not None

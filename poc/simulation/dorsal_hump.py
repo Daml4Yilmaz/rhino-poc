@@ -88,6 +88,7 @@ def _anatomical_frame(landmarks_mm: dict[str, np.ndarray]) -> dict[str, np.ndarr
         "roi_start_mm": 0.0,
         "roi_end_mm": roi_end_mm,
         "half_width_mm": half_width_mm,
+        "alar_width_mm": alar_width_mm,
         "surface_depth_mm": 3.5,
     }
 
@@ -222,15 +223,17 @@ def _connected_dorsal_component(
     return connected
 
 
-def _laplacian_profile_deformation(
+def _laplacian_dorsal_deformation(
     *,
     faces: np.ndarray,
     roi_vertex_mask: np.ndarray,
     boundary_mask: np.ndarray,
-    profile_constraint_mask: np.ndarray,
-    desired_profile_displacement_mm: np.ndarray,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Fit a smooth scalar displacement field over the connected dorsal surface."""
+    dorsal_constraint_mask: np.ndarray,
+    desired_posterior_displacement_mm: np.ndarray,
+    desired_lateral_shift_mm: np.ndarray,
+    reduction_mm: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Fit smooth posterior and medial fields over the connected dorsal surface."""
     from scipy.sparse import coo_matrix, diags, eye
     from scipy.sparse.linalg import spsolve
 
@@ -257,49 +260,73 @@ def _laplacian_profile_deformation(
     )
 
     local_boundary = boundary_mask[roi_vertices]
-    local_profile = profile_constraint_mask[roi_vertices] & ~local_boundary
-    if np.count_nonzero(local_profile) < 3:
+    local_dorsal = dorsal_constraint_mask[roi_vertices] & ~local_boundary
+    if np.count_nonzero(local_dorsal) < 3:
         raise RuntimeError(
             "Too few dorsal-profile vertices are available as deformation constraints"
         )
     if np.count_nonzero(local_boundary) < 3:
         raise RuntimeError("Too few ROI boundary vertices are available to protect nearby anatomy")
 
-    # This biharmonic scalar solve behaves like a thin elastic sheet: the ridge
-    # follows the corrected profile, the anatomical boundary remains fixed, and
-    # unconstrained vertices move coherently with their connected neighbours.
+    # The two biharmonic fields behave like a thin elastic sheet: the complete
+    # transverse bridge follows the corrected section, the anatomical boundary
+    # remains fixed, and unconstrained vertices move with connected neighbours.
     constraint_weight = np.zeros(len(roi_vertices), dtype=np.float64)
-    constraint_target = np.zeros(len(roi_vertices), dtype=np.float64)
-    constraint_weight[local_profile] = 2500.0
-    constraint_target[local_profile] = desired_profile_displacement_mm[roi_vertices[local_profile]]
+    constraint_target = np.zeros((len(roi_vertices), 2), dtype=np.float64)
+    constraint_weight[local_dorsal] = 2500.0
+    constraint_target[local_dorsal, 0] = desired_posterior_displacement_mm[
+        roi_vertices[local_dorsal]
+    ]
+    constraint_target[local_dorsal, 1] = desired_lateral_shift_mm[roi_vertices[local_dorsal]]
     constraint_weight[local_boundary] = 10000.0
     system = (
         normalized_laplacian.T @ normalized_laplacian
         + diags(constraint_weight)
         + eye(len(roi_vertices), format="csr") * 1e-9
     ).tocsc()
-    local_displacement = np.asarray(
-        spsolve(system, constraint_weight * constraint_target), dtype=np.float64
+    local_deformation = np.asarray(
+        spsolve(system, constraint_weight[:, None] * constraint_target), dtype=np.float64
     )
-    if not np.all(np.isfinite(local_displacement)):
+    if not np.all(np.isfinite(local_deformation)):
         raise RuntimeError("Laplacian dorsal deformation did not converge to finite positions")
-    maximum_target = float(np.max(desired_profile_displacement_mm))
-    local_displacement = np.clip(local_displacement, 0.0, maximum_target)
-    local_displacement[local_boundary] = 0.0
-    displacement_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
-    displacement_mm[roi_vertices] = local_displacement
-    displacement_mm[displacement_mm < 1e-8] = 0.0
+    maximum_target = float(np.max(desired_posterior_displacement_mm))
+    local_posterior = np.clip(local_deformation[:, 0], 0.0, maximum_target)
+    local_lateral = local_deformation[:, 1]
+    maximum_lateral = max(float(np.max(np.abs(desired_lateral_shift_mm))), 1e-9)
+    local_lateral = np.clip(local_lateral, -maximum_lateral, maximum_lateral)
+    local_posterior[local_boundary] = 0.0
+    local_lateral[local_boundary] = 0.0
 
-    edge_change = np.abs(displacement_mm[active_edges[:, 0]] - displacement_mm[active_edges[:, 1]])
+    # The slider remains an upper bound on total 3D motion, including the mild
+    # medial sidewall adjustment.
+    local_magnitude = np.hypot(local_posterior, local_lateral)
+    over_limit = local_magnitude > float(reduction_mm)
+    scale = np.ones_like(local_magnitude)
+    scale[over_limit] = float(reduction_mm) / local_magnitude[over_limit]
+    local_posterior *= scale
+    local_lateral *= scale
+    posterior_displacement_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
+    lateral_shift_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
+    posterior_displacement_mm[roi_vertices] = local_posterior
+    lateral_shift_mm[roi_vertices] = local_lateral
+    posterior_displacement_mm[posterior_displacement_mm < 1e-8] = 0.0
+    lateral_shift_mm[np.abs(lateral_shift_mm) < 1e-8] = 0.0
+
+    vector_change = np.hypot(
+        posterior_displacement_mm[active_edges[:, 0]]
+        - posterior_displacement_mm[active_edges[:, 1]],
+        lateral_shift_mm[active_edges[:, 0]] - lateral_shift_mm[active_edges[:, 1]],
+    )
     diagnostics = {
-        "method": "biharmonic_laplacian_scalar_field",
+        "method": "biharmonic_laplacian_3d_dorsal_field",
         "connected_roi_vertex_count": len(roi_vertices),
-        "profile_constraint_vertex_count": int(np.count_nonzero(local_profile)),
+        "dorsal_cross_section_constraint_vertex_count": int(np.count_nonzero(local_dorsal)),
         "fixed_boundary_vertex_count": int(np.count_nonzero(local_boundary)),
-        "maximum_neighbor_displacement_change_mm": round(float(np.max(edge_change)), 6),
-        "p95_neighbor_displacement_change_mm": round(float(np.percentile(edge_change, 95)), 6),
+        "maximum_neighbor_displacement_change_mm": round(float(np.max(vector_change)), 6),
+        "p95_neighbor_displacement_change_mm": round(float(np.percentile(vector_change, 95)), 6),
+        "maximum_medial_sidewall_adjustment_mm": round(float(np.max(np.abs(lateral_shift_mm))), 6),
     }
-    return displacement_mm, diagnostics
+    return posterior_displacement_mm, lateral_shift_mm, diagnostics
 
 
 def _compute_dorsal_hump_deformation(
@@ -389,7 +416,11 @@ def _compute_dorsal_hump_deformation(
         right=0.0,
     )
     profile_core_half_width_mm = min(2.5, 0.35 * float(frame["half_width_mm"]))
-    profile_half_width_mm = min(14.0, 1.35 * float(frame["half_width_mm"]))
+    bridge_core_half_width_mm = min(
+        0.26 * float(frame["alar_width_mm"]),
+        0.62 * min(22.0, 2.05 * float(frame["half_width_mm"])),
+    )
+    profile_half_width_mm = min(22.0, 2.05 * float(frame["half_width_mm"]))
     lateral_transition = np.maximum(np.abs(lateral) - profile_core_half_width_mm, 0.0) / (
         profile_half_width_mm - profile_core_half_width_mm
     )
@@ -397,37 +428,89 @@ def _compute_dorsal_hump_deformation(
     lateral_distance = np.abs(lateral) / profile_half_width_mm
     within_longitudinal = (longitudinal > start) & (longitudinal < end)
     surface_gap_mm = source_profile_at_vertex - anterior
-    surface_band = (surface_gap_mm >= -1.5) & (surface_gap_mm <= float(frame["surface_depth_mm"]))
+    surface_depth_limit_mm = max(float(frame["surface_depth_mm"]), reduction_mm + 3.0)
+    surface_band = (surface_gap_mm >= -1.5) & (surface_gap_mm <= surface_depth_limit_mm)
     candidate_roi_mask = within_longitudinal & (lateral_distance < 1.0) & surface_band
+
+    # Translate a broad transverse bridge section with the corrected profile.
+    # A small crown reserve makes the center remain subtly anterior to the
+    # shoulders, avoiding a flat central strip even on an originally broad ridge.
+    normalized_bridge_radius = np.clip(
+        np.abs(lateral) / max(bridge_core_half_width_mm, 1e-9), 0.0, 1.0
+    )
+    crown_reserve_mm = min(0.3, 0.06 * reduction_mm)
+    longitudinal_correction_weight = (
+        desired_profile_displacement_mm / reduction_mm
+        if reduction_mm > 0.0
+        else np.zeros(len(vertices_m), dtype=np.float64)
+    )
+    desired_posterior_displacement_mm = np.maximum(
+        desired_profile_displacement_mm
+        - crown_reserve_mm
+        * longitudinal_correction_weight
+        * (1.0 - _smootherstep01(normalized_bridge_radius)),
+        0.0,
+    )
+    normalized_lateral_radius = np.clip(lateral_distance, 0.0, 1.0)
+    maximum_narrowing_mm = min(0.6, 0.1 * reduction_mm)
+    transverse_narrowing_weight = np.sin(np.pi * normalized_lateral_radius) ** 2
+    desired_lateral_shift_mm = (
+        -np.sign(lateral)
+        * maximum_narrowing_mm
+        * longitudinal_correction_weight
+        * transverse_narrowing_weight
+    )
+    sidewall_depth_floor_mm = 1.8
+    desired_sidewall_depth_mm = (
+        sidewall_depth_floor_mm
+        * longitudinal_correction_weight
+        * _smootherstep01(normalized_bridge_radius)
+    )
+    required_sidewall_posterior_mm = np.minimum(
+        np.maximum(
+            desired_posterior_displacement_mm - surface_gap_mm + desired_sidewall_depth_mm,
+            0.0,
+        ),
+        desired_profile_displacement_mm,
+    )
 
     deformation_solver: dict[str, Any]
     if reduction_mm == 0.0:
         roi_vertex_mask = candidate_roi_mask
-        displacement_mm = np.zeros(len(vertices_m), dtype=np.float64)
+        posterior_displacement_mm = np.zeros(len(vertices_m), dtype=np.float64)
+        lateral_shift_mm = np.zeros(len(vertices_m), dtype=np.float64)
         deformation_solver = {
             "method": "identity_zero_reduction",
             "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
-            "profile_constraint_vertex_count": 0,
+            "dorsal_cross_section_constraint_vertex_count": 0,
             "fixed_boundary_vertex_count": 0,
             "maximum_neighbor_displacement_change_mm": 0.0,
             "p95_neighbor_displacement_change_mm": 0.0,
+            "maximum_medial_sidewall_adjustment_mm": 0.0,
         }
     elif faces is None:
         # Compatibility fallback for callers that only have a point array. The
         # production path always supplies triangle topology and uses the sparse
         # Laplacian solve below.
         roi_vertex_mask = candidate_roi_mask
-        displacement_mm = desired_profile_displacement_mm * lateral_weight * roi_vertex_mask
-        displacement_mm[displacement_mm < 1e-8] = 0.0
+        posterior_displacement_mm = (
+            desired_posterior_displacement_mm * lateral_weight * roi_vertex_mask
+        )
+        lateral_shift_mm = desired_lateral_shift_mm * roi_vertex_mask
+        posterior_displacement_mm[posterior_displacement_mm < 1e-8] = 0.0
+        lateral_shift_mm[np.abs(lateral_shift_mm) < 1e-8] = 0.0
         deformation_solver = {
-            "method": "continuous_profile_with_analytic_lateral_falloff_no_topology",
+            "method": "continuous_3d_dorsal_target_with_analytic_falloff_no_topology",
             "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
-            "profile_constraint_vertex_count": int(
-                np.count_nonzero(roi_vertex_mask & (np.abs(lateral) <= profile_core_half_width_mm))
+            "dorsal_cross_section_constraint_vertex_count": int(
+                np.count_nonzero(roi_vertex_mask & (np.abs(lateral) <= bridge_core_half_width_mm))
             ),
             "fixed_boundary_vertex_count": 0,
             "maximum_neighbor_displacement_change_mm": None,
             "p95_neighbor_displacement_change_mm": None,
+            "maximum_medial_sidewall_adjustment_mm": round(
+                float(np.max(np.abs(lateral_shift_mm))), 6
+            ),
         }
     else:
         edges = _mesh_edges(faces, len(vertices_m))
@@ -455,22 +538,52 @@ def _compute_dorsal_hump_deformation(
             | (normalized_vertex_position >= 0.96)
             | (lateral_distance >= 0.88)
         )
-        profile_constraint_mask = (
+        bridge_constraint_mask = (
             roi_vertex_mask
-            & (np.abs(lateral) <= profile_core_half_width_mm)
-            & (np.abs(surface_gap_mm) <= 1.25)
+            & (np.abs(lateral) <= bridge_core_half_width_mm)
+            & (surface_gap_mm <= desired_profile_displacement_mm + 1.25)
         )
-        displacement_mm, deformation_solver = _laplacian_profile_deformation(
+        sidewall_support_mask = (
+            roi_vertex_mask
+            & (np.abs(lateral) > bridge_core_half_width_mm)
+            & (lateral_distance < 0.96)
+            & (required_sidewall_posterior_mm > 0.05)
+        )
+        dorsal_constraint_mask = bridge_constraint_mask | sidewall_support_mask
+        solver_posterior_target_mm = np.where(
+            bridge_constraint_mask,
+            np.maximum(
+                desired_posterior_displacement_mm,
+                required_sidewall_posterior_mm,
+            ),
+            required_sidewall_posterior_mm,
+        )
+        (
+            posterior_displacement_mm,
+            lateral_shift_mm,
+            deformation_solver,
+        ) = _laplacian_dorsal_deformation(
             faces=np.asarray(faces, dtype=np.int64),
             roi_vertex_mask=roi_vertex_mask,
             boundary_mask=boundary_mask,
-            profile_constraint_mask=profile_constraint_mask,
-            desired_profile_displacement_mm=desired_profile_displacement_mm,
+            dorsal_constraint_mask=dorsal_constraint_mask,
+            desired_posterior_displacement_mm=solver_posterior_target_mm,
+            desired_lateral_shift_mm=desired_lateral_shift_mm,
+            reduction_mm=reduction_mm,
         )
 
-    simulated = (
-        vertices_m - displacement_mm[:, None] * np.asarray(frame["anterior"])[None, :] / 1000.0
+    # Numerical smoothing must never move either side farther away from the
+    # midline or allow a vertex to cross it.
+    lateral_shift_mm[lateral * lateral_shift_mm > 0.0] = 0.0
+    lateral_shift_mm = np.sign(lateral_shift_mm) * np.minimum(
+        np.abs(lateral_shift_mm), 0.45 * np.abs(lateral)
     )
+    simulated = (
+        vertices_m
+        - posterior_displacement_mm[:, None] * np.asarray(frame["anterior"])[None, :] / 1000.0
+        + lateral_shift_mm[:, None] * np.asarray(frame["lateral"])[None, :] / 1000.0
+    )
+    displacement_mm = np.hypot(posterior_displacement_mm, lateral_shift_mm)
     roi_metadata["profile_model"] = {
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
         "reference_profile": "straight chord through robust nasion and supratip anchors",
@@ -490,11 +603,22 @@ def _compute_dorsal_hump_deformation(
         ),
     }
     roi_metadata["profile_core_half_width_mm"] = round(profile_core_half_width_mm, 6)
+    roi_metadata["transverse_bridge_core_half_width_mm"] = round(bridge_core_half_width_mm, 6)
     roi_metadata["profile_deformation_half_width_mm"] = round(profile_half_width_mm, 6)
+    roi_metadata["surface_depth_limit_mm"] = round(surface_depth_limit_mm, 6)
     roi_metadata["landmark_estimated_dorsal_half_width_mm"] = roi_metadata["lateral_half_width_mm"]
     roi_metadata["lateral_half_width_mm"] = round(profile_half_width_mm, 6)
     roi_metadata["deformation_solver"] = deformation_solver
     roi_metadata["pointwise_envelope_clipping"] = False
+    roi_metadata["transverse_model"] = {
+        "cross_section_behavior": "measured source bridge translated as a connected 3D section",
+        "central_crown_reserve_mm": round(crown_reserve_mm, 6),
+        "requested_maximum_medial_adjustment_mm": round(maximum_narrowing_mm, 6),
+        "actual_maximum_medial_adjustment_mm": round(float(np.max(np.abs(lateral_shift_mm))), 6),
+        "sidewall_blending": "biharmonic falloff to fixed lateral and longitudinal boundaries",
+        "minimum_transverse_sidewall_depth_below_ridge_mm": sidewall_depth_floor_mm,
+        "left_right_symmetrization": False,
+    }
     apex_point_mm = (
         np.asarray(frame["origin"])
         + centers[apex_index] * np.asarray(frame["vertical"])
@@ -513,7 +637,7 @@ def _compute_dorsal_hump_deformation(
         "is_clinical_measurement": False,
     }
     roi_metadata["candidate_vertex_count"] = int(np.count_nonzero(roi_vertex_mask))
-    simulated_anterior = anterior - displacement_mm
+    simulated_anterior = anterior - posterior_displacement_mm
     _, simulated_profile, _ = _dorsal_profile(
         longitudinal,
         lateral,
@@ -527,6 +651,8 @@ def _compute_dorsal_hump_deformation(
         "target_anterior_mm": target_profile,
         "simulated_anterior_mm": simulated_profile,
         "centerline_reduction_mm": centerline_reduction,
+        "posterior_displacement_mm": posterior_displacement_mm,
+        "lateral_shift_mm": lateral_shift_mm,
     }
     return simulated, displacement_mm, roi_metadata, roi_vertex_mask, profile_diagnostic
 
@@ -617,6 +743,235 @@ def _export_moved_vertices_ply(
     return int(np.count_nonzero(moved))
 
 
+def _vertex_normals(vertices_m: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    """Compute area-weighted unit normals directly from the current geometry."""
+    triangles = vertices_m[faces]
+    face_normals = np.cross(
+        triangles[:, 1] - triangles[:, 0],
+        triangles[:, 2] - triangles[:, 0],
+    )
+    normals = np.zeros_like(vertices_m, dtype=np.float64)
+    for corner in range(3):
+        np.add.at(normals, faces[:, corner], face_normals)
+    lengths = np.linalg.norm(normals, axis=1)
+    valid = lengths > 1e-12
+    normals[valid] /= lengths[valid, None]
+    if not np.all(valid):
+        raise RuntimeError("The simulation mesh contains vertices without usable normals")
+    return normals
+
+
+def _sample_cross_section(
+    longitudinal: np.ndarray,
+    lateral: np.ndarray,
+    anterior: np.ndarray,
+    *,
+    level_mm: float,
+    half_width_mm: float,
+    longitudinal_window_mm: float,
+    bin_count: int = 49,
+) -> tuple[np.ndarray, np.ndarray]:
+    edges = np.linspace(-half_width_mm, half_width_mm, bin_count + 1)
+    centers = (edges[:-1] + edges[1:]) * 0.5
+    section = np.full(bin_count, np.nan, dtype=np.float64)
+    near_level = np.abs(longitudinal - level_mm) <= longitudinal_window_mm
+    for index in range(bin_count):
+        selected = near_level & (lateral >= edges[index]) & (lateral < edges[index + 1])
+        if np.any(selected):
+            section[index] = float(np.percentile(anterior[selected], 90.0))
+    available = np.flatnonzero(np.isfinite(section))
+    if len(available) < max(9, bin_count // 5):
+        raise RuntimeError(f"Insufficient transverse bridge coverage at {level_mm:.3f} mm")
+    section = np.interp(np.arange(bin_count), available, section[available])
+    return centers, _smooth_series(section, sigma_bins=1.0)
+
+
+def _section_width(lateral_mm: np.ndarray, anterior_mm: np.ndarray, depth_mm: float) -> float:
+    ridge = float(np.max(anterior_mm))
+    within = anterior_mm >= ridge - depth_mm
+    if np.count_nonzero(within) < 2:
+        return 0.0
+    return float(np.max(lateral_mm[within]) - np.min(lateral_mm[within]))
+
+
+def _cross_section_diagnostics(
+    source_vertices_m: np.ndarray,
+    simulated_vertices_m: np.ndarray,
+    frame: dict[str, Any],
+    apex_normalized: float,
+    half_width_mm: float,
+) -> dict[str, Any]:
+    source_longitudinal, source_lateral, source_anterior = _coordinates(
+        source_vertices_m * 1000.0, frame
+    )
+    simulated_longitudinal, simulated_lateral, simulated_anterior = _coordinates(
+        simulated_vertices_m * 1000.0, frame
+    )
+    start = float(frame["roi_start_mm"])
+    span = float(frame["roi_end_mm"]) - start
+    levels = {
+        "radix_upper_dorsum": 0.15,
+        "hump_region": apex_normalized,
+        "mid_dorsum": 0.64,
+        "supratip": 0.88,
+    }
+    longitudinal_window_mm = max(0.8, 0.025 * span)
+    sections: dict[str, Any] = {}
+    for name, normalized in levels.items():
+        level_mm = start + normalized * span
+        source_x, source_y = _sample_cross_section(
+            source_longitudinal,
+            source_lateral,
+            source_anterior,
+            level_mm=level_mm,
+            half_width_mm=half_width_mm,
+            longitudinal_window_mm=longitudinal_window_mm,
+        )
+        simulated_x, simulated_y = _sample_cross_section(
+            simulated_longitudinal,
+            simulated_lateral,
+            simulated_anterior,
+            level_mm=level_mm,
+            half_width_mm=half_width_mm,
+            longitudinal_window_mm=longitudinal_window_mm,
+        )
+        central = np.abs(simulated_x) <= min(4.5, 0.35 * half_width_mm)
+        simulated_curvature = float(np.polyfit(simulated_x[central], simulated_y[central], 2)[0])
+        source_curvature = float(np.polyfit(source_x[central], source_y[central], 2)[0])
+        sections[name] = {
+            "normalized_nasion_to_supratip": round(float(normalized), 6),
+            "longitudinal_mm_from_nasion": round(level_mm, 6),
+            "source_lateral_mm": source_x.round(6).tolist(),
+            "source_anterior_mm": source_y.round(6).tolist(),
+            "simulated_lateral_mm": simulated_x.round(6).tolist(),
+            "simulated_anterior_mm": simulated_y.round(6).tolist(),
+            "source_width_at_1_5mm_depth_mm": round(_section_width(source_x, source_y, 1.5), 6),
+            "simulated_width_at_1_5mm_depth_mm": round(
+                _section_width(simulated_x, simulated_y, 1.5), 6
+            ),
+            "source_ridge_lateral_mm": round(float(source_x[np.argmax(source_y)]), 6),
+            "simulated_ridge_lateral_mm": round(float(simulated_x[np.argmax(simulated_y)]), 6),
+            "source_central_quadratic_curvature_per_mm": round(source_curvature, 8),
+            "simulated_central_quadratic_curvature_per_mm": round(simulated_curvature, 8),
+        }
+    return {
+        "definition": "frontal transverse anterior envelope",
+        "width_definition": "lateral span within 1.5 mm posterior to the dorsal ridge",
+        "longitudinal_sampling_half_window_mm": round(longitudinal_window_mm, 6),
+        "sections": sections,
+    }
+
+
+def _svg_cross_section_points(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    offset_x: float,
+    offset_y: float,
+    x_min: float,
+    y_min: float,
+    x_span: float,
+    y_span: float,
+    panel_width: int,
+    panel_height: int,
+    margin: int,
+) -> str:
+    px = offset_x + margin + (x_values - x_min) / x_span * (panel_width - 2 * margin)
+    py = (
+        offset_y + panel_height - margin - (y_values - y_min) / y_span * (panel_height - 2 * margin)
+    )
+    return " ".join(f"{x:.2f},{y:.2f}" for x, y in zip(px, py))
+
+
+def _write_cross_section_svg(output_path: Path, diagnostic: dict[str, Any]) -> None:
+    panel_width = 520
+    panel_height = 380
+    margin = 55
+    sections = list(diagnostic["sections"].items())
+    svg_parts = [
+        (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="760" '
+            'viewBox="0 0 1040 760">'
+        ),
+        '<rect width="100%" height="100%" fill="white"/>',
+    ]
+    for panel_index, (name, section) in enumerate(sections):
+        column = panel_index % 2
+        row = panel_index // 2
+        offset_x = column * panel_width
+        offset_y = row * panel_height
+        source_x = np.asarray(section["source_lateral_mm"], dtype=np.float64)
+        source_y = np.asarray(section["source_anterior_mm"], dtype=np.float64)
+        simulated_x = np.asarray(section["simulated_lateral_mm"], dtype=np.float64)
+        simulated_y = np.asarray(section["simulated_anterior_mm"], dtype=np.float64)
+        all_x = np.concatenate([source_x, simulated_x])
+        all_y = np.concatenate([source_y, simulated_y])
+        x_min, x_max = float(np.min(all_x)), float(np.max(all_x))
+        y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
+        x_span = max(x_max - x_min, 1e-9)
+        y_span = max(y_max - y_min, 1e-9)
+
+        source_points = _svg_cross_section_points(
+            source_x,
+            source_y,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            x_min=x_min,
+            y_min=y_min,
+            x_span=x_span,
+            y_span=y_span,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+        )
+        simulated_points = _svg_cross_section_points(
+            simulated_x,
+            simulated_y,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            x_min=x_min,
+            y_min=y_min,
+            x_span=x_span,
+            y_span=y_span,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+        )
+
+        title = name.replace("_", " ")
+        source_width = section["source_width_at_1_5mm_depth_mm"]
+        simulated_width = section["simulated_width_at_1_5mm_depth_mm"]
+        svg_parts.extend(
+            [
+                (
+                    f'<rect x="{offset_x + margin}" y="{offset_y + margin}" '
+                    f'width="{panel_width - 2 * margin}" '
+                    f'height="{panel_height - 2 * margin}" fill="none" stroke="#555"/>'
+                ),
+                (
+                    f'<polyline points="{source_points}" fill="none" '
+                    'stroke="#d62728" stroke-width="3"/>'
+                ),
+                (
+                    f'<polyline points="{simulated_points}" fill="none" '
+                    'stroke="#1f77b4" stroke-width="3"/>'
+                ),
+                (
+                    f'<text x="{offset_x + margin}" y="{offset_y + 28}" '
+                    f'font-family="sans-serif" font-size="18">{title}</text>'
+                ),
+                (
+                    f'<text x="{offset_x + margin}" y="{offset_y + 48}" '
+                    f'font-family="sans-serif" font-size="12">'
+                    f"red source {source_width:.2f} mm | "
+                    f"blue simulated {simulated_width:.2f} mm</text>"
+                ),
+            ]
+        )
+    svg_parts.append("</svg>")
+    output_path.write_text("\n".join(svg_parts), encoding="utf-8")
+
+
 def _write_profile_svg(output_path: Path, profile: dict[str, np.ndarray]) -> float:
     width = 900
     height = 520
@@ -663,6 +1018,7 @@ def _projection_image(
     vertical_label: str,
     vertical_increases_down: bool,
     highlight_mask: np.ndarray | None = None,
+    point_colors_bgr: np.ndarray | None = None,
     bounds: tuple[float, float, float, float] | None = None,
 ) -> tuple[np.ndarray, tuple[float, float, float, float]]:
     import cv2
@@ -697,8 +1053,15 @@ def _projection_image(
     shade = 195.0 - 130.0 * np.clip((depth - depth_min) / depth_span, 0.0, 1.0)
     order = np.argsort(depth[valid], kind="stable")
     valid_indices = np.flatnonzero(valid)[order]
-    gray = shade[valid_indices].astype(np.uint8)
-    canvas[py[valid_indices], px[valid_indices]] = np.column_stack([gray, gray, gray])
+    if point_colors_bgr is None:
+        gray = shade[valid_indices].astype(np.uint8)
+        rendered_colors = np.column_stack([gray, gray, gray])
+    else:
+        colors = np.asarray(point_colors_bgr, dtype=np.uint8)
+        if colors.shape != (len(horizontal), 3):
+            raise ValueError("Projection colors must contain one BGR triplet per vertex")
+        rendered_colors = colors[valid_indices]
+    canvas[py[valid_indices], px[valid_indices]] = rendered_colors
     canvas = cv2.erode(canvas, np.ones((2, 2), dtype=np.uint8), iterations=1)
 
     if highlight_mask is not None:
@@ -736,6 +1099,7 @@ def _write_diagnostic_renders(
     label: str,
     source_vertices_m: np.ndarray,
     simulated_vertices_m: np.ndarray,
+    faces: np.ndarray,
     frame: dict[str, Any],
     affected_vertex_mask: np.ndarray,
 ) -> dict[str, Path]:
@@ -749,6 +1113,34 @@ def _write_diagnostic_renders(
         simulated_vertices_m * 1000.0,
         frame,
     )
+    source_normals = _vertex_normals(source_vertices_m, faces)
+    simulated_normals = _vertex_normals(simulated_vertices_m, faces)
+    anterior_axis = np.asarray(frame["anterior"])
+    if float(np.median(source_normals @ anterior_axis)) < 0.0:
+        source_normals *= -1.0
+    if float(np.median(simulated_normals @ anterior_axis)) < 0.0:
+        simulated_normals *= -1.0
+    light_direction = _unit(
+        0.25 * np.asarray(frame["lateral"]) - 0.2 * np.asarray(frame["vertical"]) + anterior_axis,
+        "diagnostic light direction",
+    )
+
+    def clay_colors(normals: np.ndarray) -> np.ndarray:
+        illumination = 0.3 + 0.7 * np.clip(normals @ light_direction, 0.0, 1.0)
+        gray = np.clip(45.0 + 190.0 * illumination, 0.0, 255.0).astype(np.uint8)
+        return np.column_stack([gray, gray, gray])
+
+    def normal_colors(normals: np.ndarray) -> np.ndarray:
+        anatomical = np.column_stack(
+            [
+                normals @ np.asarray(frame["lateral"]),
+                normals @ np.asarray(frame["vertical"]),
+                normals @ anterior_axis,
+            ]
+        )
+        rgb = np.clip((anatomical + 1.0) * 127.5, 0.0, 255.0).astype(np.uint8)
+        return rgb[:, ::-1]
+
     front_before, front_bounds = _projection_image(
         source_lateral,
         source_longitudinal,
@@ -787,6 +1179,50 @@ def _write_diagnostic_renders(
         vertical_increases_down=False,
         bounds=profile_bounds,
     )
+    clay_before, _ = _projection_image(
+        source_lateral,
+        source_longitudinal,
+        source_anterior,
+        title="Clay front view - source",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        point_colors_bgr=clay_colors(source_normals),
+        bounds=front_bounds,
+    )
+    clay_after, _ = _projection_image(
+        simulated_lateral,
+        simulated_longitudinal,
+        simulated_anterior,
+        title="Clay front view - simulated",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        point_colors_bgr=clay_colors(simulated_normals),
+        bounds=front_bounds,
+    )
+    normal_before, _ = _projection_image(
+        source_lateral,
+        source_longitudinal,
+        source_anterior,
+        title="Normal visualization - source",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        point_colors_bgr=normal_colors(source_normals),
+        bounds=front_bounds,
+    )
+    normal_after, _ = _projection_image(
+        simulated_lateral,
+        simulated_longitudinal,
+        simulated_anterior,
+        title="Normal visualization - simulated",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        point_colors_bgr=normal_colors(simulated_normals),
+        bounds=front_bounds,
+    )
     highlighted_front, _ = _projection_image(
         source_lateral,
         source_longitudinal,
@@ -816,6 +1252,10 @@ def _write_diagnostic_renders(
         "profile_before_png": output_dir / f"reduction_{label}mm_profile_before.png",
         "profile_after_png": output_dir / f"reduction_{label}mm_profile_after.png",
         "affected_roi_render_png": output_dir / f"reduction_{label}mm_affected_roi.png",
+        "clay_before_png": output_dir / f"reduction_{label}mm_clay_before.png",
+        "clay_after_png": output_dir / f"reduction_{label}mm_clay_after.png",
+        "normal_before_png": output_dir / f"reduction_{label}mm_normals_before.png",
+        "normal_after_png": output_dir / f"reduction_{label}mm_normals_after.png",
     }
     images = {
         "front_before_png": front_before,
@@ -823,6 +1263,10 @@ def _write_diagnostic_renders(
         "profile_before_png": profile_before,
         "profile_after_png": profile_after,
         "affected_roi_render_png": roi_highlight,
+        "clay_before_png": clay_before,
+        "clay_after_png": clay_after,
+        "normal_before_png": normal_before,
+        "normal_after_png": normal_after,
     }
     for name, path in paths.items():
         if not cv2.imwrite(str(path), images[name]):
@@ -841,6 +1285,7 @@ def _export_simulation_glb(
 ) -> dict[str, float | bool]:
     import trimesh
 
+    simulated_normals = _vertex_normals(simulated_vertices_m, faces)
     if source_glb_path is not None and source_glb_path.is_file():
         mesh = _single_mesh(source_glb_path).copy()
         render_faces = np.asarray(mesh.faces, dtype=np.int64)
@@ -882,6 +1327,10 @@ def _export_simulation_glb(
             vertex_colors=vertex_colors,
             process=False,
         )
+        canonical_for_render = np.arange(len(simulated_vertices_m), dtype=np.int64)
+    # Do not let normals inherited from the source GLB survive a geometry
+    # change. Assign normals recomputed from the simulated vertex positions.
+    mesh.vertex_normals = simulated_normals[canonical_for_render]
     scene = trimesh.Scene(mesh)
 
     def add_simulation_metadata(tree: dict) -> None:
@@ -928,10 +1377,19 @@ def _export_simulation_glb(
         )
         * 1000.0
     )
+    persisted_normals = np.asarray(persisted.vertex_normals, dtype=np.float64)
+    expected_corner_normals = simulated_normals[faces]
+    persisted_corner_normals = persisted_normals[persisted_faces]
+    normal_dot = np.sum(expected_corner_normals * persisted_corner_normals, axis=2)
+    normal_error_degrees = np.degrees(np.arccos(np.clip(normal_dot, -1.0, 1.0)))
+    maximum_normal_error_degrees = float(normal_error_degrees.max())
     return {
         "maximum_vertex_error_from_ply_mm": maximum_corner_error * 1000.0,
         "maximum_displacement_from_source_mm": float(np.max(glb_displacement_mm)),
         "geometry_differs_from_source": bool(np.max(glb_displacement_mm) > 1e-5),
+        "normals_recomputed_from_simulated_geometry": True,
+        "maximum_normal_error_degrees": maximum_normal_error_degrees,
+        "p95_normal_error_degrees": float(np.percentile(normal_error_degrees, 95)),
     }
 
 
@@ -994,6 +1452,8 @@ def simulate_dorsal_hump_reduction(
     output_moved_vertices_ply = output_dir / f"reduction_{label}mm_moved_vertices.ply"
     output_profile_svg = output_dir / f"reduction_{label}mm_profile.svg"
     output_profile_json = output_dir / f"reduction_{label}mm_profile.json"
+    output_cross_sections_svg = output_dir / f"reduction_{label}mm_cross_sections.svg"
+    output_cross_sections_json = output_dir / f"reduction_{label}mm_cross_sections.json"
     output_manifest = output_dir / "simulation.json"
     if float(reduction_mm) == 0.0:
         shutil.copy2(authoritative_mesh_path, output_ply)
@@ -1008,6 +1468,17 @@ def simulate_dorsal_hump_reduction(
     persisted_faces = np.asarray(persisted.triangles, dtype=np.int64)
     if not np.array_equal(persisted_faces, faces):
         raise RuntimeError("Simulation PLY changed authoritative topology")
+    expected_persisted_normals = _vertex_normals(persisted_vertices_m, persisted_faces)
+    ply_has_vertex_normals = persisted.has_vertex_normals()
+    maximum_ply_normal_error_degrees: float | None = None
+    if ply_has_vertex_normals:
+        stored_ply_normals = np.asarray(persisted.vertex_normals, dtype=np.float64)
+        normal_dot = np.sum(stored_ply_normals * expected_persisted_normals, axis=1)
+        maximum_ply_normal_error_degrees = float(
+            np.degrees(np.arccos(np.clip(normal_dot, -1.0, 1.0))).max()
+        )
+    if float(reduction_mm) > 0.0 and not ply_has_vertex_normals:
+        raise RuntimeError("The simulated PLY was exported without recomputed vertex normals")
     persisted_displacement_mm = np.linalg.norm(persisted_vertices_m - vertices_m, axis=1) * 1000.0
     persistence_error_mm = (
         np.linalg.norm(
@@ -1055,6 +1526,20 @@ def simulate_dorsal_hump_reduction(
         encoding="utf-8",
     )
     frame = _anatomical_frame(landmarks_mm)
+    cross_section_diagnostic = _cross_section_diagnostics(
+        vertices_m,
+        persisted_vertices_m,
+        frame,
+        float(roi_metadata["detected_hump_apex"]["normalized_nasion_to_supratip"]),
+        float(roi_metadata["lateral_half_width_mm"]),
+    )
+    _write_cross_section_svg(output_cross_sections_svg, cross_section_diagnostic)
+    output_cross_sections_json.write_text(
+        json.dumps(
+            {"schema_version": 1, "units": "millimetres", **cross_section_diagnostic}, indent=2
+        ),
+        encoding="utf-8",
+    )
     source_longitudinal, _, _ = _coordinates(vertices_m * 1000.0, frame)
     maximum_displacement_vertex = int(np.argmax(persisted_displacement_mm))
     maximum_displacement_longitudinal_mm = float(source_longitudinal[maximum_displacement_vertex])
@@ -1072,6 +1557,7 @@ def simulate_dorsal_hump_reduction(
         label,
         vertices_m,
         persisted_vertices_m,
+        faces,
         frame,
         persisted_displacement_mm > 0.1,
     )
@@ -1118,7 +1604,9 @@ def simulate_dorsal_hump_reduction(
         "total_vertex_count": len(vertices_m),
         "affected_nasal_roi": roi_metadata,
         "deformation": {
-            "direction": "posterior along the landmark-derived sagittal anterior axis",
+            "direction": (
+                "posterior profile correction plus mild medial transverse sidewall adjustment"
+            ),
             "normal_based_displacement": False,
             "left_right_symmetrization": False,
             "topology_changed": False,
@@ -1139,6 +1627,16 @@ def simulate_dorsal_hump_reduction(
             "exported_moved_vertex_count": moved_vertex_export_count,
             "pointwise_envelope_clipping": roi_metadata["pointwise_envelope_clipping"],
             "deformation_solver": roi_metadata["deformation_solver"],
+            "transverse_cross_sections": cross_section_diagnostic,
+            "ply_normals": {
+                "present": ply_has_vertex_normals,
+                "recomputed_from_simulated_geometry": bool(float(reduction_mm) > 0.0),
+                "maximum_error_degrees": (
+                    round(maximum_ply_normal_error_degrees, 6)
+                    if maximum_ply_normal_error_degrees is not None
+                    else None
+                ),
+            },
             "source_mesh_hash": source_identity["geometry_id"],
             "output_mesh_hash": simulation_identity["geometry_id"],
             "output_geometry_hash_differs_from_source": geometry_hash_changed,
@@ -1162,6 +1660,8 @@ def simulate_dorsal_hump_reduction(
             ),
             "profile_comparison_svg": output_profile_svg.name,
             "profile_curve_json": output_profile_json.name,
+            "cross_sections_svg": output_cross_sections_svg.name,
+            "cross_sections_json": output_cross_sections_json.name,
             **{name: path.name for name, path in render_paths.items()},
             "manifest": output_manifest.name,
         },
@@ -1192,6 +1692,8 @@ def simulate_dorsal_hump_reduction(
         "affected_roi_ply": _sha256_file(output_roi_ply),
         "profile_comparison_svg": _sha256_file(output_profile_svg),
         "profile_curve_json": _sha256_file(output_profile_json),
+        "cross_sections_svg": _sha256_file(output_cross_sections_svg),
+        "cross_sections_json": _sha256_file(output_cross_sections_json),
         **{name: _sha256_file(path) for name, path in render_paths.items()},
     }
     if moved_vertex_export_count:
