@@ -81,25 +81,29 @@ The experimental dorsal-hump operation reads authoritative vertices once and wri
 geometry state. It derives superior–inferior, left–right, and anterior axes from existing nasal
 landmarks, estimates the observed midline dorsal envelope, fits a smooth target through the outer
 dorsal bands, and uses only positive convex excess to localize the hump. The normalized hump weight
-is searched only in the upper/mid-dorsum for one explicit apex. An apex-centered profile kernel sets
-the deformation shape while the slider sets its peak displacement; this prevents a secondary
-supratip deviation from becoming the maximum. Compact longitudinal, lateral, and surface-depth
-falloffs reach zero at the ROI boundary. It does not displace along vertex normals or symmetrize the
-source face.
+is searched only in the upper/mid-dorsum for one explicit apex. The requested correction is capped
+at the detected convexity so it cannot create a sagittal scoop. The complete connected upper/mid
+convexity receives the apex correction fraction, with C2 fades at the nasion and supratip; this keeps
+the superior shoulder from being attenuated more strongly than the peak.
 
-The 3D ROI is sampling context, not deformation permission. Actual displacement is restricted to a
-narrow sagittal dorsal band and requires the vertex to lie anterior to the request-specific corrected
-profile envelope. Vertices already on or behind that envelope remain fixed, even inside the nasal
-ROI. The full-strength midline slab transitions smoothly to zero before the lateral sidewalls.
+Deformation uses one vector-valued biharmonic solve over one connected dorsal surface. At every
+longitudinal position, `delta(s)` drives a transverse target whose ridge weight is strongest, whose
+slopes retain more than 90% of that target, and whose sidewalls taper continuously to zero only at
+the anatomical vault perimeter. Posterior and mild medial components share the same constraint
+system, so the centerline cannot move independently of the vault. Triangle adjacency, fixed
+nasion/supratip/perimeter boundaries, and the smooth target field preserve continuous transitions.
+The operation does not displace along vertex normals or symmetrize the source face.
 
 The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remain untouched. UV-seam
 render vertices follow their corresponding canonical corners in the simulated GLB. A saved
 simulation records its parent `geometry_id`, its own deterministic output identity, deformation
 parameters, affected vertex count, and explicit non-clinical status. At 0.0 mm, the simulated PLY
 is a byte-for-byte copy of the authoritative PLY. Non-zero export is rejected unless the persisted
-PLY hash differs, displacement is meaningfully close to the request, the sagittal profiles separate,
-and the reloaded GLB corners match the simulated authoritative surface. Viewer downloads use the
-simulation geometry hash in the filename to avoid stale-file ambiguity.
+PLY hash differs, displacement is meaningfully close to the applied correction, the sagittal
+profiles separate, the transverse GLB coordinates change, and the reloaded GLB corners match the
+simulated authoritative surface. Profile curves, named profile-point displacements, four transverse
+sections, clay/normal renders, and a moved-vertex heatmap are persisted for audit. Viewer downloads
+use the simulation geometry hash in the filename to avoid stale-file ambiguity.
 
 Topology-changing simulation requires an explicit old-to-new surface correspondence. It must not
 reuse old landmark bindings or measurements without remapping and validation.

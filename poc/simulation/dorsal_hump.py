@@ -22,11 +22,10 @@ REQUIRED_LANDMARKS = {
 }
 MIN_REDUCTION_MM = 0.0
 MAX_REDUCTION_MM = 5.0
-# The transverse component is deliberately exaggerated while it is being
-# validated in frontal views.  Keep this separate from the sagittal/profile
-# correction so changing it cannot alter the established hump curve.
-TRANSVERSE_DIAGNOSTIC_EXAGGERATION = 3.0
-MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM = 1.8
+DORSAL_VAULT_SOLVER_ID = "coupled-vector-biharmonic-full-vault-v1"
+# Medial refinement remains mild even though it is solved together with the
+# posterior full-vault field.
+MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM = 0.6
 
 
 def _unit(vector: np.ndarray, label: str) -> np.ndarray:
@@ -146,8 +145,8 @@ def _dorsal_profile(
     profile = _smooth_series(profile)
 
     normalized = (centers - start) / (end - start)
-    proximal_anchor = (normalized >= 0.02) & (normalized <= 0.12)
-    distal_anchor = (normalized >= 0.88) & (normalized <= 0.98)
+    proximal_anchor = (normalized >= 0.01) & (normalized <= 0.08)
+    distal_anchor = (normalized >= 0.94) & (normalized <= 0.995)
     proximal_position = float(np.median(centers[proximal_anchor]))
     distal_position = float(np.median(centers[distal_anchor]))
     proximal_height = float(np.median(profile[proximal_anchor]))
@@ -157,34 +156,10 @@ def _dorsal_profile(
     return centers, profile, target
 
 
-def _smooth_compact_falloff(normalized_distance: np.ndarray) -> np.ndarray:
-    inside = np.clip(1.0 - normalized_distance, 0.0, 1.0)
-    return inside * inside * (3.0 - 2.0 * inside)
-
-
 def _smootherstep01(value: np.ndarray) -> np.ndarray:
     """C2-continuous interpolation with zero slope and curvature at both ends."""
     clipped = np.clip(value, 0.0, 1.0)
     return clipped**3 * (clipped * (clipped * 6.0 - 15.0) + 10.0)
-
-
-def _continuous_profile_correction(
-    normalized_position: np.ndarray,
-    apex_normalized: float,
-    reduction_mm: float,
-) -> np.ndarray:
-    """Return one continuous nasion-to-supratip correction curve.
-
-    The two quintic Hermite segments meet at the hump apex with matching zero
-    first and second derivatives. This avoids the local on/off behavior that
-    produced a scoop at the edge of the old pointwise target envelope.
-    """
-    if reduction_mm == 0.0:
-        return np.zeros_like(normalized_position, dtype=np.float64)
-    proximal = _smootherstep01(normalized_position / apex_normalized)
-    distal = _smootherstep01((1.0 - normalized_position) / (1.0 - apex_normalized))
-    shape = np.where(normalized_position <= apex_normalized, proximal, distal)
-    return float(reduction_mm) * shape
 
 
 def _mesh_edges(faces: np.ndarray, vertex_count: int) -> np.ndarray:
@@ -228,17 +203,17 @@ def _connected_dorsal_component(
     return connected
 
 
-def _laplacian_dorsal_deformation(
+def _laplacian_vector_deformation(
     *,
     faces: np.ndarray,
     roi_vertex_mask: np.ndarray,
     boundary_mask: np.ndarray,
-    dorsal_constraint_mask: np.ndarray,
-    desired_posterior_displacement_mm: np.ndarray,
-    desired_lateral_shift_mm: np.ndarray,
-    reduction_mm: float,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Fit smooth posterior and medial fields over the connected dorsal surface."""
+    constraint_mask: np.ndarray,
+    desired_components_mm: np.ndarray,
+    maximum_posterior_mm: float,
+    maximum_medial_mm: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit one coupled posterior/lateral field over the connected dorsal vault."""
     from scipy.sparse import coo_matrix, diags, eye
     from scipy.sparse.linalg import spsolve
 
@@ -265,24 +240,23 @@ def _laplacian_dorsal_deformation(
     )
 
     local_boundary = boundary_mask[roi_vertices]
-    local_dorsal = dorsal_constraint_mask[roi_vertices] & ~local_boundary
-    if np.count_nonzero(local_dorsal) < 3:
-        raise RuntimeError(
-            "Too few dorsal-profile vertices are available as deformation constraints"
-        )
+    local_constraints = constraint_mask[roi_vertices] & ~local_boundary
+    if np.count_nonzero(local_constraints) < 3:
+        raise RuntimeError("Too few dorsal vertices are available as deformation constraints")
     if np.count_nonzero(local_boundary) < 3:
         raise RuntimeError("Too few ROI boundary vertices are available to protect nearby anatomy")
 
-    # The two biharmonic fields behave like a thin elastic sheet: the complete
-    # transverse bridge follows the corrected section, the anatomical boundary
-    # remains fixed, and unconstrained vertices move with connected neighbours.
+    desired_components_mm = np.asarray(desired_components_mm, dtype=np.float64)
+    if desired_components_mm.shape != (len(roi_vertex_mask), 2):
+        raise ValueError("Dorsal-vault constraints must contain posterior/lateral components")
+
+    # One matrix and one vector-valued right-hand side couple the complete
+    # dorsal vault. Ridge, slopes, and sidewalls are constraints on the same
+    # smooth sheet; there is no independently deformed center strip.
     constraint_weight = np.zeros(len(roi_vertices), dtype=np.float64)
     constraint_target = np.zeros((len(roi_vertices), 2), dtype=np.float64)
-    constraint_weight[local_dorsal] = 2500.0
-    constraint_target[local_dorsal, 0] = desired_posterior_displacement_mm[
-        roi_vertices[local_dorsal]
-    ]
-    constraint_target[local_dorsal, 1] = desired_lateral_shift_mm[roi_vertices[local_dorsal]]
+    constraint_weight[local_constraints] = 2500.0
+    constraint_target[local_constraints] = desired_components_mm[roi_vertices[local_constraints]]
     constraint_weight[local_boundary] = 10000.0
     system = (
         normalized_laplacian.T @ normalized_laplacian
@@ -294,44 +268,30 @@ def _laplacian_dorsal_deformation(
     )
     if not np.all(np.isfinite(local_deformation)):
         raise RuntimeError("Laplacian dorsal deformation did not converge to finite positions")
-    maximum_target = float(np.max(desired_posterior_displacement_mm))
-    local_posterior = np.clip(local_deformation[:, 0], 0.0, maximum_target)
-    local_lateral = local_deformation[:, 1]
-    maximum_lateral = max(float(np.max(np.abs(desired_lateral_shift_mm))), 1e-9)
-    local_lateral = np.clip(local_lateral, -maximum_lateral, maximum_lateral)
-    local_posterior[local_boundary] = 0.0
-    local_lateral[local_boundary] = 0.0
+    local_deformation[:, 0] = np.clip(local_deformation[:, 0], 0.0, maximum_posterior_mm)
+    local_deformation[:, 1] = np.clip(
+        local_deformation[:, 1], -maximum_medial_mm, maximum_medial_mm
+    )
+    local_deformation[local_boundary] = 0.0
+    displacement_components_mm = np.zeros((len(roi_vertex_mask), 2), dtype=np.float64)
+    displacement_components_mm[roi_vertices] = local_deformation
+    displacement_components_mm[np.abs(displacement_components_mm) < 1e-8] = 0.0
 
-    # The slider remains an upper bound on total 3D motion, including the mild
-    # medial sidewall adjustment.
-    local_magnitude = np.hypot(local_posterior, local_lateral)
-    over_limit = local_magnitude > float(reduction_mm)
-    scale = np.ones_like(local_magnitude)
-    scale[over_limit] = float(reduction_mm) / local_magnitude[over_limit]
-    local_posterior *= scale
-    local_lateral *= scale
-    posterior_displacement_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
-    lateral_shift_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
-    posterior_displacement_mm[roi_vertices] = local_posterior
-    lateral_shift_mm[roi_vertices] = local_lateral
-    posterior_displacement_mm[posterior_displacement_mm < 1e-8] = 0.0
-    lateral_shift_mm[np.abs(lateral_shift_mm) < 1e-8] = 0.0
-
-    vector_change = np.hypot(
-        posterior_displacement_mm[active_edges[:, 0]]
-        - posterior_displacement_mm[active_edges[:, 1]],
-        lateral_shift_mm[active_edges[:, 0]] - lateral_shift_mm[active_edges[:, 1]],
+    edge_change = np.linalg.norm(
+        displacement_components_mm[active_edges[:, 0]]
+        - displacement_components_mm[active_edges[:, 1]],
+        axis=1,
     )
     diagnostics = {
-        "method": "biharmonic_laplacian_3d_dorsal_field",
+        "solver_id": DORSAL_VAULT_SOLVER_ID,
+        "method": "coupled_vector_biharmonic_dorsal_vault",
         "connected_roi_vertex_count": len(roi_vertices),
-        "dorsal_cross_section_constraint_vertex_count": int(np.count_nonzero(local_dorsal)),
+        "constraint_vertex_count": int(np.count_nonzero(local_constraints)),
         "fixed_boundary_vertex_count": int(np.count_nonzero(local_boundary)),
-        "maximum_neighbor_displacement_change_mm": round(float(np.max(vector_change)), 6),
-        "p95_neighbor_displacement_change_mm": round(float(np.percentile(vector_change, 95)), 6),
-        "maximum_medial_sidewall_adjustment_mm": round(float(np.max(np.abs(lateral_shift_mm))), 6),
+        "maximum_neighbor_displacement_change_mm": round(float(np.max(edge_change)), 6),
+        "p95_neighbor_displacement_change_mm": round(float(np.percentile(edge_change, 95)), 6),
     }
-    return posterior_displacement_mm, lateral_shift_mm, diagnostics
+    return displacement_components_mm, diagnostics
 
 
 def _compute_dorsal_hump_deformation(
@@ -339,7 +299,14 @@ def _compute_dorsal_hump_deformation(
     landmarks_mm: dict[str, np.ndarray],
     reduction_mm: float,
     faces: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any], np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    dict[str, Any],
+    np.ndarray,
+    dict[str, np.ndarray],
+    np.ndarray,
+]:
     """Compute deformation plus internal ROI/profile diagnostics without mutating inputs."""
     reduction_mm = float(reduction_mm)
     if not np.isfinite(reduction_mm) or not MIN_REDUCTION_MM <= reduction_mm <= MAX_REDUCTION_MM:
@@ -392,19 +359,46 @@ def _compute_dorsal_hump_deformation(
     end = float(frame["roi_end_mm"])
     normalized_centers = (centers - start) / (end - start)
     convex_excess = np.maximum(profile - reference_profile, 0.0)
-    apex_search = (normalized_centers >= 0.08) & (normalized_centers <= 0.72)
+    apex_search = (normalized_centers >= 0.08) & (normalized_centers <= 0.62)
     apex_candidates = np.flatnonzero(apex_search)
     apex_index = int(apex_candidates[np.argmax(convex_excess[apex_search])])
     available_hump_mm = float(convex_excess[apex_index])
     apex_normalized = float(normalized_centers[apex_index])
     if reduction_mm > 0.0 and available_hump_mm <= 1e-6:
         raise RuntimeError("No positive upper/mid-dorsal convexity was found for hump reduction")
-    centerline_reduction = _continuous_profile_correction(
-        normalized_centers,
-        apex_normalized,
-        reduction_mm,
+    applied_reduction_mm = min(reduction_mm, available_hump_mm)
+    # Do not drive the profile behind its nasion-to-supratip reference.  The
+    # requested value is a ceiling; the detectable convexity is the anatomical
+    # ceiling.  This prevents an oversized slider request from creating a new
+    # sagittal scoop.
+    upper_fade = _smootherstep01(normalized_centers / 0.08)
+    distal_support_end = min(0.82, max(0.70, apex_normalized + 0.28))
+    distal_fade = 1.0 - _smootherstep01(
+        (normalized_centers - apex_normalized)
+        / max(distal_support_end - apex_normalized, 1e-9)
+    )
+    upper_mid_window = upper_fade * np.where(
+        normalized_centers <= apex_normalized,
+        1.0,
+        distal_fade,
+    )
+    applied_convexity_fraction = (
+        applied_reduction_mm / available_hump_mm if available_hump_mm > 1e-9 else 0.0
+    )
+    # Reduce the complete superior shoulder and apex by one fraction, then fade
+    # smoothly through the mid dorsum. This deliberately avoids carrying the
+    # peak correction into the lower dorsum and supratip.
+    centerline_reduction = np.minimum(
+        convex_excess * applied_convexity_fraction * upper_mid_window,
+        convex_excess,
     )
     target_profile = profile - centerline_reduction
+    maximum_new_below_reference_mm = float(
+        np.max(
+            np.maximum(reference_profile - target_profile, 0.0)
+            - np.maximum(reference_profile - profile, 0.0)
+        )
+    )
 
     source_profile_at_vertex = np.interp(
         longitudinal,
@@ -421,105 +415,84 @@ def _compute_dorsal_hump_deformation(
         right=0.0,
     )
     profile_core_half_width_mm = min(2.5, 0.35 * float(frame["half_width_mm"]))
-    bridge_core_half_width_mm = min(
-        0.26 * float(frame["alar_width_mm"]),
-        0.62 * min(22.0, 2.05 * float(frame["half_width_mm"])),
+    vault_half_width_mm = min(
+        22.0,
+        0.56 * float(frame["alar_width_mm"]),
+        2.00 * float(frame["half_width_mm"]),
     )
-    profile_half_width_mm = min(22.0, 2.05 * float(frame["half_width_mm"]))
-    lateral_transition = np.maximum(np.abs(lateral) - profile_core_half_width_mm, 0.0) / (
-        profile_half_width_mm - profile_core_half_width_mm
-    )
-    lateral_weight = _smooth_compact_falloff(lateral_transition)
-    lateral_distance = np.abs(lateral) / profile_half_width_mm
+    bridge_core_half_width_mm = 0.68 * vault_half_width_mm
     within_longitudinal = (longitudinal > start) & (longitudinal < end)
     surface_gap_mm = source_profile_at_vertex - anterior
-    surface_depth_limit_mm = max(float(frame["surface_depth_mm"]), reduction_mm + 3.0)
+    surface_depth_limit_mm = max(8.0, float(frame["surface_depth_mm"]), applied_reduction_mm + 4.0)
     surface_band = (surface_gap_mm >= -1.5) & (surface_gap_mm <= surface_depth_limit_mm)
-    candidate_roi_mask = within_longitudinal & (lateral_distance < 1.0) & surface_band
+    lateral_radius = np.abs(lateral) / max(vault_half_width_mm, 1e-9)
+    surface_radius = np.clip(np.maximum(surface_gap_mm, 0.0) / surface_depth_limit_mm, 0.0, 1.0)
+    vault_radius = np.maximum(lateral_radius, 0.80 * np.sqrt(surface_radius))
+    candidate_roi_mask = within_longitudinal & (vault_radius < 1.0) & surface_band
 
-    # Translate a broad transverse bridge section with the corrected profile.
-    # A small crown reserve makes the center remain subtly anterior to the
-    # shoulders, avoiding a flat central strip even on an originally broad ridge.
-    normalized_bridge_radius = np.clip(
-        np.abs(lateral) / max(bridge_core_half_width_mm, 1e-9), 0.0, 1.0
+    # One explicit transverse vault field: the ridge receives delta(s), dorsal
+    # slopes retain most of it, and the sidewalls taper smoothly to the fixed
+    # anatomical perimeter.  There is no special center-strip permission mask.
+    inner_vault_weight = 1.0 - 0.06 * _smootherstep01(vault_radius / 0.68)
+    outer_vault_weight = 0.94 * (
+        1.0 - _smootherstep01((vault_radius - 0.68) / (1.0 - 0.68))
     )
-    crown_reserve_mm = min(0.3, 0.06 * reduction_mm)
+    transverse_vault_weight = np.where(
+        vault_radius <= 0.68,
+        inner_vault_weight,
+        outer_vault_weight,
+    )
+    transverse_vault_weight[~candidate_roi_mask] = 0.0
     longitudinal_correction_weight = (
-        desired_profile_displacement_mm / reduction_mm
-        if reduction_mm > 0.0
+        desired_profile_displacement_mm / applied_reduction_mm
+        if applied_reduction_mm > 0.0
         else np.zeros(len(vertices_m), dtype=np.float64)
     )
-    desired_posterior_displacement_mm = np.maximum(
-        desired_profile_displacement_mm
-        - crown_reserve_mm
-        * longitudinal_correction_weight
-        * (1.0 - _smootherstep01(normalized_bridge_radius)),
-        0.0,
+    desired_posterior_mm = desired_profile_displacement_mm * transverse_vault_weight
+
+    # Mild medialization is part of the same vector target. It is zero on the
+    # ridge, peaks across the slopes/sidewalls, and returns to zero at the vault
+    # boundary, so the solve cannot leave stationary lateral rails.
+    maximum_narrowing_mm = min(MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM, 0.1 * applied_reduction_mm)
+    transverse_narrowing_weight = _smootherstep01(vault_radius / 0.35) * (
+        1.0 - _smootherstep01((vault_radius - 0.72) / 0.28)
     )
-    normalized_lateral_radius = np.clip(lateral_distance, 0.0, 1.0)
-    natural_narrowing_mm = min(0.6, 0.1 * reduction_mm)
-    maximum_narrowing_mm = min(
-        MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM,
-        TRANSVERSE_DIAGNOSTIC_EXAGGERATION * natural_narrowing_mm,
-    )
-    transverse_narrowing_weight = np.sin(np.pi * normalized_lateral_radius) ** 2
     desired_lateral_shift_mm = (
         -np.sign(lateral)
         * maximum_narrowing_mm
         * longitudinal_correction_weight
         * transverse_narrowing_weight
     )
-    sidewall_depth_floor_mm = 1.8
-    desired_sidewall_depth_mm = (
-        sidewall_depth_floor_mm
-        * longitudinal_correction_weight
-        * _smootherstep01(normalized_bridge_radius)
-    )
-    required_sidewall_posterior_mm = np.minimum(
-        np.maximum(
-            desired_posterior_displacement_mm - surface_gap_mm + desired_sidewall_depth_mm,
-            0.0,
-        ),
-        desired_profile_displacement_mm,
+    desired_components_mm = np.column_stack(
+        [desired_posterior_mm, desired_lateral_shift_mm]
     )
 
-    deformation_solver: dict[str, Any]
     if reduction_mm == 0.0:
         roi_vertex_mask = candidate_roi_mask
-        posterior_displacement_mm = np.zeros(len(vertices_m), dtype=np.float64)
-        lateral_shift_mm = np.zeros(len(vertices_m), dtype=np.float64)
+        displacement_components_mm = np.zeros((len(vertices_m), 2), dtype=np.float64)
         deformation_solver = {
+            "solver_id": DORSAL_VAULT_SOLVER_ID,
             "method": "identity_zero_reduction",
             "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
-            "dorsal_cross_section_constraint_vertex_count": 0,
+            "constraint_vertex_count": 0,
             "fixed_boundary_vertex_count": 0,
             "maximum_neighbor_displacement_change_mm": 0.0,
             "p95_neighbor_displacement_change_mm": 0.0,
-            "maximum_medial_sidewall_adjustment_mm": 0.0,
         }
     elif faces is None:
-        # Compatibility fallback for callers that only have a point array. The
-        # production path always supplies triangle topology and uses the sparse
-        # Laplacian solve below.
+        # Compatibility fallback only. Production always supplies topology and
+        # uses the coupled sparse solve below.
         roi_vertex_mask = candidate_roi_mask
-        posterior_displacement_mm = (
-            desired_posterior_displacement_mm * lateral_weight * roi_vertex_mask
-        )
-        lateral_shift_mm = desired_lateral_shift_mm * roi_vertex_mask
-        posterior_displacement_mm[posterior_displacement_mm < 1e-8] = 0.0
-        lateral_shift_mm[np.abs(lateral_shift_mm) < 1e-8] = 0.0
+        displacement_components_mm = desired_components_mm * roi_vertex_mask[:, None]
+        displacement_components_mm[np.abs(displacement_components_mm) < 1e-8] = 0.0
         deformation_solver = {
-            "method": "continuous_3d_dorsal_target_with_analytic_falloff_no_topology",
+            "solver_id": DORSAL_VAULT_SOLVER_ID,
+            "method": "analytic_full_vault_target_no_topology",
             "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
-            "dorsal_cross_section_constraint_vertex_count": int(
-                np.count_nonzero(roi_vertex_mask & (np.abs(lateral) <= bridge_core_half_width_mm))
-            ),
+            "constraint_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
             "fixed_boundary_vertex_count": 0,
             "maximum_neighbor_displacement_change_mm": None,
             "p95_neighbor_displacement_change_mm": None,
-            "maximum_medial_sidewall_adjustment_mm": round(
-                float(np.max(np.abs(lateral_shift_mm))), 6
-            ),
         }
     else:
         edges = _mesh_edges(faces, len(vertices_m))
@@ -545,47 +518,31 @@ def _compute_dorsal_hump_deformation(
             edge_has_outside_neighbor
             | (normalized_vertex_position <= 0.04)
             | (normalized_vertex_position >= 0.96)
-            | (lateral_distance >= 0.88)
+            | (vault_radius >= 0.94)
         )
-        bridge_constraint_mask = (
-            roi_vertex_mask
-            & (np.abs(lateral) <= bridge_core_half_width_mm)
-            & (surface_gap_mm <= desired_profile_displacement_mm + 1.25)
-        )
-        sidewall_support_mask = (
-            roi_vertex_mask
-            & (np.abs(lateral) > bridge_core_half_width_mm)
-            & (lateral_distance < 0.96)
-            & (required_sidewall_posterior_mm > 0.05)
-        )
-        dorsal_constraint_mask = bridge_constraint_mask | sidewall_support_mask
-        solver_posterior_target_mm = np.where(
-            bridge_constraint_mask,
-            np.maximum(
-                desired_posterior_displacement_mm,
-                required_sidewall_posterior_mm,
-            ),
-            required_sidewall_posterior_mm,
-        )
-        (
-            posterior_displacement_mm,
-            lateral_shift_mm,
-            deformation_solver,
-        ) = _laplacian_dorsal_deformation(
+        vault_constraint_mask = roi_vertex_mask & ~boundary_mask
+        displacement_components_mm, deformation_solver = _laplacian_vector_deformation(
             faces=np.asarray(faces, dtype=np.int64),
             roi_vertex_mask=roi_vertex_mask,
             boundary_mask=boundary_mask,
-            dorsal_constraint_mask=dorsal_constraint_mask,
-            desired_posterior_displacement_mm=solver_posterior_target_mm,
-            desired_lateral_shift_mm=desired_lateral_shift_mm,
-            reduction_mm=reduction_mm,
+            constraint_mask=vault_constraint_mask,
+            desired_components_mm=desired_components_mm,
+            maximum_posterior_mm=applied_reduction_mm,
+            maximum_medial_mm=maximum_narrowing_mm,
         )
 
+    posterior_displacement_mm = displacement_components_mm[:, 0]
+    lateral_shift_mm = displacement_components_mm[:, 1]
     # Numerical smoothing must never move either side farther away from the
     # midline or allow a vertex to cross it.
     lateral_shift_mm[lateral * lateral_shift_mm > 0.0] = 0.0
     lateral_shift_mm = np.sign(lateral_shift_mm) * np.minimum(
         np.abs(lateral_shift_mm), 0.45 * np.abs(lateral)
+    )
+    target_vertices_m = (
+        vertices_m
+        - desired_posterior_mm[:, None] * np.asarray(frame["anterior"])[None, :] / 1000.0
+        + desired_lateral_shift_mm[:, None] * np.asarray(frame["lateral"])[None, :] / 1000.0
     )
     simulated = (
         vertices_m
@@ -597,8 +554,8 @@ def _compute_dorsal_hump_deformation(
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
         "reference_profile": "straight chord through robust nasion and supratip anchors",
         "target_profile": (
-            "C2-continuous apex-centered correction using a quintic curve from nasion through "
-            "the detected apex to supratip"
+            "upper/mid convex-excess correction with C2 anatomical fades and a no-scoop "
+            "nasion-to-supratip reference constraint"
         ),
         "convex_hump_only": True,
         "available_hump_height_mm": round(available_hump_mm, 6),
@@ -607,28 +564,89 @@ def _compute_dorsal_hump_deformation(
             "algorithmic convex excess above the simulation target profile"
         ),
         "requested_peak_policy": (
-            "detected upper/mid-dorsal apex defines the deformation center; slider value defines "
-            "peak reduction"
+            "slider value is an upper bound; correction stops at the no-scoop reference profile"
         ),
+        "requested_peak_reduction_mm": round(reduction_mm, 6),
+        "applied_peak_reduction_mm": round(applied_reduction_mm, 6),
+        "applied_upper_mid_convexity_fraction": round(applied_convexity_fraction, 6),
+        "limited_by_detected_convexity": applied_reduction_mm < reduction_mm,
+        "maximum_new_below_reference_mm": round(maximum_new_below_reference_mm, 9),
     }
     roi_metadata["profile_core_half_width_mm"] = round(profile_core_half_width_mm, 6)
     roi_metadata["transverse_bridge_core_half_width_mm"] = round(bridge_core_half_width_mm, 6)
-    roi_metadata["profile_deformation_half_width_mm"] = round(profile_half_width_mm, 6)
+    roi_metadata["profile_deformation_half_width_mm"] = round(vault_half_width_mm, 6)
     roi_metadata["surface_depth_limit_mm"] = round(surface_depth_limit_mm, 6)
     roi_metadata["landmark_estimated_dorsal_half_width_mm"] = roi_metadata["lateral_half_width_mm"]
-    roi_metadata["lateral_half_width_mm"] = round(profile_half_width_mm, 6)
+    roi_metadata["lateral_half_width_mm"] = round(vault_half_width_mm, 6)
     roi_metadata["deformation_solver"] = deformation_solver
     roi_metadata["pointwise_envelope_clipping"] = False
+    apex_level_mask = roi_vertex_mask & (
+        np.abs(longitudinal - centers[apex_index]) <= max(1.0, 0.035 * (end - start))
+    )
+
+    def displacement_band(minimum_radius: float, maximum_radius: float) -> dict[str, Any]:
+        band_mask = (
+            apex_level_mask
+            & (vault_radius >= minimum_radius)
+            & (vault_radius < maximum_radius)
+        )
+        values = posterior_displacement_mm[band_mask]
+        return {
+            "normalized_radius": [minimum_radius, maximum_radius],
+            "vertex_count": int(np.count_nonzero(band_mask)),
+            "median_posterior_displacement_mm": round(
+                float(np.median(values)) if len(values) else 0.0, 6
+            ),
+            "fraction_moved_over_0_1_mm": round(
+                float(np.mean(values > 0.1)) if len(values) else 0.0, 6
+            ),
+        }
+
+    ridge_band = displacement_band(0.0, 0.25)
+    slope_band = displacement_band(0.25, 0.60)
+    sidewall_band = displacement_band(0.60, 0.85)
+    ridge_median = float(ridge_band["median_posterior_displacement_mm"])
+    slope_to_ridge_ratio = (
+        float(slope_band["median_posterior_displacement_mm"]) / ridge_median
+        if ridge_median > 1e-9
+        else 0.0
+    )
+    sidewall_to_ridge_ratio = (
+        float(sidewall_band["median_posterior_displacement_mm"]) / ridge_median
+        if ridge_median > 1e-9
+        else 0.0
+    )
+    roi_metadata["vault_displacement_coverage"] = {
+        "sampling_level": "detected_hump_apex",
+        "ridge": ridge_band,
+        "dorsal_slopes": slope_band,
+        "sidewalls": sidewall_band,
+        "slope_to_ridge_median_ratio": round(slope_to_ridge_ratio, 6),
+        "sidewall_to_ridge_median_ratio": round(sidewall_to_ridge_ratio, 6),
+        "center_strip_pattern_detected": (
+            slope_to_ridge_ratio < 0.75 or sidewall_to_ridge_ratio < 0.45
+        ),
+    }
     roi_metadata["transverse_model"] = {
-        "cross_section_behavior": "measured source bridge translated as a connected 3D section",
-        "central_crown_reserve_mm": round(crown_reserve_mm, 6),
-        "diagnostic_exaggeration_enabled": True,
-        "diagnostic_exaggeration_factor": TRANSVERSE_DIAGNOSTIC_EXAGGERATION,
-        "unexaggerated_maximum_medial_adjustment_mm": round(natural_narrowing_mm, 6),
+        "cross_section_behavior": (
+            "one coupled ridge-slope-sidewall target across the connected dorsal vault"
+        ),
+        "ridge_target_weight": 1.0,
+        "slope_target_weight_at_normalized_radius_0_5": round(
+            float(1.0 - 0.06 * _smootherstep01(np.asarray([0.5 / 0.68]))[0]), 6
+        ),
+        "sidewall_target_weight_at_normalized_radius_0_8": round(
+            float(0.94 * (1.0 - _smootherstep01(np.asarray([(0.8 - 0.68) / 0.32]))[0])),
+            6,
+        ),
+        "zero_weight_normalized_radius": 1.0,
         "requested_maximum_medial_adjustment_mm": round(maximum_narrowing_mm, 6),
         "actual_maximum_medial_adjustment_mm": round(float(np.max(np.abs(lateral_shift_mm))), 6),
-        "sidewall_blending": "biharmonic falloff to fixed lateral and longitudinal boundaries",
-        "minimum_transverse_sidewall_depth_below_ridge_mm": sidewall_depth_floor_mm,
+        "sidewall_blending": (
+            "posterior and medial components solved together with a fixed anatomical perimeter"
+        ),
+        "coupled_single_solve": True,
+        "entire_vault_is_constraint_surface": True,
         "left_right_symmetrization": False,
     }
     apex_point_mm = (
@@ -645,15 +663,15 @@ def _compute_dorsal_hump_deformation(
         "target_anterior_mm": round(float(target_profile[apex_index]), 6),
         "outward_convexity_mm": round(available_hump_mm, 6),
         "world_position_mm": apex_point_mm.round(6).tolist(),
-        "search_band_normalized": [0.08, 0.72],
+        "search_band_normalized": [0.08, 0.62],
         "is_clinical_measurement": False,
     }
     roi_metadata["candidate_vertex_count"] = int(np.count_nonzero(roi_vertex_mask))
-    simulated_anterior = anterior - posterior_displacement_mm
-    _, simulated_profile, _ = _dorsal_profile(
-        longitudinal,
-        lateral,
-        simulated_anterior,
+    final_longitudinal, final_lateral, final_anterior = _coordinates(simulated * 1000.0, frame)
+    _, final_profile, _ = _dorsal_profile(
+        final_longitudinal,
+        final_lateral,
+        final_anterior,
         frame,
     )
     profile_diagnostic = {
@@ -661,12 +679,80 @@ def _compute_dorsal_hump_deformation(
         "source_anterior_mm": profile,
         "reference_anterior_mm": reference_profile,
         "target_anterior_mm": target_profile,
-        "simulated_anterior_mm": simulated_profile,
+        "final_anterior_mm": final_profile,
+        "simulated_anterior_mm": final_profile,
+        "delta_mm": centerline_reduction,
         "centerline_reduction_mm": centerline_reduction,
         "posterior_displacement_mm": posterior_displacement_mm,
         "lateral_shift_mm": lateral_shift_mm,
+        "transverse_vault_weight": transverse_vault_weight,
     }
-    return simulated, displacement_mm, roi_metadata, roi_vertex_mask, profile_diagnostic
+    diagnostic_levels = {
+        "radix_nasion": 0.0,
+        "upper_dorsum": 0.18,
+        "hump_apex": apex_normalized,
+        "mid_dorsum": 0.55,
+        "lower_dorsum": 0.72,
+        "supratip": 0.88,
+    }
+    profile_points: dict[str, Any] = {}
+    for name, normalized in diagnostic_levels.items():
+        level_mm = start + float(normalized) * (end - start)
+        source_value = float(np.interp(level_mm, centers, profile))
+        reference_value = float(np.interp(level_mm, centers, reference_profile))
+        target_value = float(np.interp(level_mm, centers, target_profile))
+        final_value = float(np.interp(level_mm, centers, final_profile))
+        point_convex_excess_mm = max(source_value - reference_value, 0.0)
+        point_requested_displacement_mm = source_value - target_value
+        profile_points[name] = {
+            "normalized_nasion_to_supratip": round(float(normalized), 6),
+            "longitudinal_mm_from_nasion": round(level_mm, 6),
+            "source_anterior_mm": round(source_value, 6),
+            "reference_anterior_mm": round(reference_value, 6),
+            "target_anterior_mm": round(target_value, 6),
+            "final_anterior_mm": round(final_value, 6),
+            "source_convex_excess_mm": round(point_convex_excess_mm, 6),
+            "requested_posterior_displacement_mm": round(point_requested_displacement_mm, 6),
+            "requested_convexity_reduction_fraction": round(
+                float(
+                    np.clip(
+                        point_requested_displacement_mm / point_convex_excess_mm
+                        if point_convex_excess_mm > 1e-9
+                        else 0.0,
+                        0.0,
+                        1.0,
+                    )
+                ),
+                6,
+            ),
+            "final_posterior_displacement_mm": round(source_value - final_value, 6),
+            "final_target_error_mm": round(final_value - target_value, 6),
+        }
+    tip_anterior_mm = float(
+        np.dot(normalized_landmarks["pronasale"] - np.asarray(frame["origin"]), frame["anterior"])
+    )
+    profile_points["pronasale"] = {
+        "normalized_nasion_to_supratip": None,
+        "longitudinal_mm_from_nasion": round(float(frame["tip_longitudinal_mm"]), 6),
+        "source_anterior_mm": round(tip_anterior_mm, 6),
+        "reference_anterior_mm": None,
+        "target_anterior_mm": round(tip_anterior_mm, 6),
+        "final_anterior_mm": round(tip_anterior_mm, 6),
+        "source_convex_excess_mm": 0.0,
+        "requested_posterior_displacement_mm": 0.0,
+        "requested_convexity_reduction_fraction": 0.0,
+        "final_posterior_displacement_mm": 0.0,
+        "final_target_error_mm": 0.0,
+    }
+    roi_metadata["profile_point_diagnostics"] = profile_points
+    return (
+        simulated,
+        displacement_mm,
+        roi_metadata,
+        roi_vertex_mask,
+        profile_diagnostic,
+        target_vertices_m,
+    )
 
 
 def compute_dorsal_hump_deformation(
@@ -676,7 +762,7 @@ def compute_dorsal_hump_deformation(
     faces: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Return simulated vertices and displacement magnitudes without mutating input arrays."""
-    simulated, displacement_mm, roi_metadata, _, _ = _compute_dorsal_hump_deformation(
+    simulated, displacement_mm, roi_metadata, _, _, _ = _compute_dorsal_hump_deformation(
         vertices_m,
         landmarks_mm,
         reduction_mm,
@@ -808,14 +894,19 @@ def _section_width(lateral_mm: np.ndarray, anterior_mm: np.ndarray, depth_mm: fl
 
 def _cross_section_diagnostics(
     source_vertices_m: np.ndarray,
+    target_vertices_m: np.ndarray,
     simulated_vertices_m: np.ndarray,
     frame: dict[str, Any],
     apex_normalized: float,
     half_width_mm: float,
+    profile_core_half_width_mm: float,
     bridge_core_half_width_mm: float,
 ) -> dict[str, Any]:
     source_longitudinal, source_lateral, source_anterior = _coordinates(
         source_vertices_m * 1000.0, frame
+    )
+    target_longitudinal, target_lateral, target_anterior = _coordinates(
+        target_vertices_m * 1000.0, frame
     )
     simulated_longitudinal, simulated_lateral, simulated_anterior = _coordinates(
         simulated_vertices_m * 1000.0, frame
@@ -823,7 +914,7 @@ def _cross_section_diagnostics(
     start = float(frame["roi_start_mm"])
     span = float(frame["roi_end_mm"]) - start
     levels = {
-        "radix_upper_dorsum": 0.15,
+        "upper_dorsum": 0.18,
         "hump_region": apex_normalized,
         "mid_dorsum": 0.64,
         "supratip": 0.88,
@@ -840,6 +931,14 @@ def _cross_section_diagnostics(
             half_width_mm=half_width_mm,
             longitudinal_window_mm=longitudinal_window_mm,
         )
+        target_x, target_y = _sample_cross_section(
+            target_longitudinal,
+            target_lateral,
+            target_anterior,
+            level_mm=level_mm,
+            half_width_mm=half_width_mm,
+            longitudinal_window_mm=longitudinal_window_mm,
+        )
         simulated_x, simulated_y = _sample_cross_section(
             simulated_longitudinal,
             simulated_lateral,
@@ -852,6 +951,7 @@ def _cross_section_diagnostics(
         simulated_curvature = float(np.polyfit(simulated_x[central], simulated_y[central], 2)[0])
         source_curvature = float(np.polyfit(source_x[central], source_y[central], 2)[0])
         source_envelope_width_mm = _section_width(source_x, source_y, 1.5)
+        target_envelope_width_mm = _section_width(target_x, target_y, 1.5)
         simulated_envelope_width_mm = _section_width(simulated_x, simulated_y, 1.5)
 
         # Measure the two actual sidewalls by vertex identity.  Reporting the
@@ -870,6 +970,11 @@ def _cross_section_diagnostics(
             float(np.ptp(source_lateral[matched_bridge]))
             if np.count_nonzero(matched_bridge) >= 2
             else source_envelope_width_mm
+        )
+        width_target_mm = (
+            float(np.ptp(target_lateral[matched_bridge]))
+            if np.count_nonzero(matched_bridge) >= 2
+            else target_envelope_width_mm
         )
         width_after_mm = (
             float(np.ptp(simulated_lateral[matched_bridge]))
@@ -903,25 +1008,76 @@ def _cross_section_diagnostics(
             if np.any(right_medial_mm > 1e-6)
             else 0.0
         )
+        central_height_before_mm = float(np.interp(0.0, source_x, source_y))
+        central_height_target_mm = float(np.interp(0.0, target_x, target_y))
+        central_height_after_mm = float(np.interp(0.0, simulated_x, simulated_y))
+
+        def sidewall_position(mask: np.ndarray, x: np.ndarray, y: np.ndarray) -> dict[str, float]:
+            if not np.any(mask):
+                return {"lateral_mm": 0.0, "anterior_mm": 0.0}
+            return {
+                "lateral_mm": round(float(np.median(x[mask])), 6),
+                "anterior_mm": round(float(np.median(y[mask])), 6),
+            }
+
+        left_sidewall_before = sidewall_position(left_sidewall, source_lateral, source_anterior)
+        left_sidewall_target = sidewall_position(left_sidewall, target_lateral, target_anterior)
+        left_sidewall_after = sidewall_position(
+            left_sidewall, simulated_lateral, simulated_anterior
+        )
+        right_sidewall_before = sidewall_position(right_sidewall, source_lateral, source_anterior)
+        right_sidewall_target = sidewall_position(
+            right_sidewall, target_lateral, target_anterior
+        )
+        right_sidewall_after = sidewall_position(
+            right_sidewall, simulated_lateral, simulated_anterior
+        )
+        ridge_core = np.abs(simulated_x) <= profile_core_half_width_mm
+        ridge_shoulders = (np.abs(simulated_x) > profile_core_half_width_mm) & (
+            np.abs(simulated_x) <= bridge_core_half_width_mm
+        )
+        central_ridge_prominence_mm = (
+            float(central_height_after_mm - np.max(simulated_y[ridge_shoulders]))
+            if np.any(ridge_core) and np.any(ridge_shoulders)
+            else 0.0
+        )
         sections[name] = {
             "normalized_nasion_to_supratip": round(float(normalized), 6),
             "longitudinal_mm_from_nasion": round(level_mm, 6),
             "width_before_mm": round(width_before_mm, 6),
+            "width_target_mm": round(width_target_mm, 6),
             "width_after_mm": round(width_after_mm, 6),
+            "central_height_before_mm": round(central_height_before_mm, 6),
+            "central_height_target_mm": round(central_height_target_mm, 6),
+            "central_height_after_mm": round(central_height_after_mm, 6),
+            "central_posterior_displacement_mm": round(
+                central_height_before_mm - central_height_after_mm, 6
+            ),
+            "left_sidewall_position_before": left_sidewall_before,
+            "left_sidewall_position_target": left_sidewall_target,
+            "left_sidewall_position_after": left_sidewall_after,
+            "right_sidewall_position_before": right_sidewall_before,
+            "right_sidewall_position_target": right_sidewall_target,
+            "right_sidewall_position_after": right_sidewall_after,
             "left_sidewall_displacement_mm": round(left_sidewall_displacement_mm, 6),
             "right_sidewall_displacement_mm": round(right_sidewall_displacement_mm, 6),
             "left_sidewall_sample_count": int(np.count_nonzero(left_sidewall)),
             "right_sidewall_sample_count": int(np.count_nonzero(right_sidewall)),
             "source_lateral_mm": source_x.round(6).tolist(),
             "source_anterior_mm": source_y.round(6).tolist(),
+            "target_lateral_mm": target_x.round(6).tolist(),
+            "target_anterior_mm": target_y.round(6).tolist(),
             "simulated_lateral_mm": simulated_x.round(6).tolist(),
             "simulated_anterior_mm": simulated_y.round(6).tolist(),
             "source_width_at_1_5mm_depth_mm": round(source_envelope_width_mm, 6),
+            "target_width_at_1_5mm_depth_mm": round(target_envelope_width_mm, 6),
             "simulated_width_at_1_5mm_depth_mm": round(simulated_envelope_width_mm, 6),
             "source_ridge_lateral_mm": round(float(source_x[np.argmax(source_y)]), 6),
             "simulated_ridge_lateral_mm": round(float(simulated_x[np.argmax(simulated_y)]), 6),
             "source_central_quadratic_curvature_per_mm": round(source_curvature, 8),
             "simulated_central_quadratic_curvature_per_mm": round(simulated_curvature, 8),
+            "final_central_ridge_prominence_mm": round(central_ridge_prominence_mm, 6),
+            "final_has_central_dent": central_ridge_prominence_mm < -0.05,
         }
     return {
         "definition": "frontal transverse anterior envelope",
@@ -935,8 +1091,150 @@ def _cross_section_diagnostics(
         "sidewall_displacement_definition": (
             "median medial displacement of source-identical dorsal sidewall vertices"
         ),
+        "sidewall_position_definition": (
+            "median lateral/anterior coordinates of source-identical dorsal sidewall vertices"
+        ),
+        "central_height_definition": (
+            "anterior coordinate of the sampled transverse envelope at the patient midline"
+        ),
+        "deformation_model": "one coupled vector solve over the connected dorsal vault",
         "longitudinal_sampling_half_window_mm": round(longitudinal_window_mm, 6),
         "sections": sections,
+    }
+
+
+def _acceptance_diagnostics(
+    profile: dict[str, np.ndarray],
+    cross_sections: dict[str, Any],
+    frame: dict[str, Any],
+    applied_reduction_mm: float,
+    vault_coverage: dict[str, Any],
+) -> dict[str, Any]:
+    """Summarize whether the numerical result meets the profile/vault objectives."""
+    applied_reduction_mm = float(applied_reduction_mm)
+    if applied_reduction_mm <= 0.0:
+        return {
+            "passed": True,
+            "identity_request": True,
+            "profile": {"passed": True, "active_upper_mid_sample_count": 0},
+            "frontal_vault": {
+                "passed": True,
+                "corrected_section_count": 0,
+                "no_center_strip_pattern": True,
+            },
+        }
+
+    longitudinal = np.asarray(profile["longitudinal_mm"], dtype=np.float64)
+    requested = np.asarray(profile["centerline_reduction_mm"], dtype=np.float64)
+    achieved = np.asarray(profile["source_anterior_mm"], dtype=np.float64) - np.asarray(
+        profile["final_anterior_mm"], dtype=np.float64
+    )
+    target_error = np.asarray(profile["final_anterior_mm"], dtype=np.float64) - np.asarray(
+        profile["target_anterior_mm"], dtype=np.float64
+    )
+    normalized = (longitudinal - float(frame["roi_start_mm"])) / (
+        float(frame["roi_end_mm"]) - float(frame["roi_start_mm"])
+    )
+    active = (
+        (normalized >= 0.08)
+        & (normalized <= 0.72)
+        & (requested >= max(0.05, 0.05 * applied_reduction_mm))
+    )
+    lower_band = (normalized >= 0.70) & (normalized <= 0.82)
+    maximum_lower_requested_mm = (
+        float(np.max(requested[lower_band])) if np.any(lower_band) else 0.0
+    )
+    lower_to_peak_ratio = maximum_lower_requested_mm / max(applied_reduction_mm, 1e-9)
+    lower_dorsum_not_overcorrected = lower_to_peak_ratio <= 0.35
+    if np.any(active):
+        achievement_ratio = achieved[active] / np.maximum(requested[active], 1e-9)
+        p10_achievement_ratio = float(np.percentile(achievement_ratio, 10.0))
+        maximum_target_error_mm = float(np.max(np.abs(target_error[active])))
+        profile_passed = (
+            p10_achievement_ratio >= 0.85
+            and maximum_target_error_mm <= max(0.25, 0.15 * applied_reduction_mm)
+            and lower_dorsum_not_overcorrected
+        )
+    else:
+        p10_achievement_ratio = 0.0
+        maximum_target_error_mm = float("inf")
+        profile_passed = False
+
+    corrected_sections = [
+        section
+        for section in cross_sections["sections"].values()
+        if section["central_posterior_displacement_mm"]
+        >= max(0.1, 0.05 * applied_reduction_mm)
+    ]
+    no_central_dent = bool(
+        corrected_sections and all(not section["final_has_central_dent"] for section in corrected_sections)
+    )
+    no_width_expansion = bool(
+        corrected_sections
+        and all(
+            section["width_after_mm"] <= section["width_before_mm"] + 0.05
+            for section in corrected_sections
+        )
+    )
+    sidewalls_not_outward = bool(
+        corrected_sections
+        and all(
+            section["left_sidewall_position_after"]["lateral_mm"]
+            >= section["left_sidewall_position_before"]["lateral_mm"] - 0.02
+            and section["right_sidewall_position_after"]["lateral_mm"]
+            <= section["right_sidewall_position_before"]["lateral_mm"] + 0.02
+            for section in corrected_sections
+        )
+    )
+    mild_narrowing = bool(
+        corrected_sections
+        and all(
+            0.0
+            <= section["width_before_mm"] - section["width_after_mm"]
+            <= 2.0 * MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM + 0.05
+            for section in corrected_sections
+        )
+    )
+    no_center_strip_pattern = not bool(vault_coverage["center_strip_pattern_detected"])
+    frontal_passed = (
+        no_central_dent
+        and no_width_expansion
+        and sidewalls_not_outward
+        and mild_narrowing
+        and no_center_strip_pattern
+    )
+    return {
+        "passed": bool(profile_passed and frontal_passed),
+        "identity_request": False,
+        "profile": {
+            "passed": bool(profile_passed),
+            "active_upper_mid_sample_count": int(np.count_nonzero(active)),
+            "p10_achieved_to_requested_correction_ratio": round(p10_achievement_ratio, 6),
+            "maximum_absolute_target_error_mm": round(maximum_target_error_mm, 6),
+            "superior_hump_not_left_behind": p10_achievement_ratio >= 0.85,
+            "smooth_target_followed": maximum_target_error_mm
+            <= max(0.25, 0.15 * applied_reduction_mm),
+            "lower_dorsum_not_overcorrected": lower_dorsum_not_overcorrected,
+            "maximum_lower_dorsum_requested_correction_mm": round(
+                maximum_lower_requested_mm, 6
+            ),
+            "lower_to_peak_requested_correction_ratio": round(lower_to_peak_ratio, 6),
+        },
+        "frontal_vault": {
+            "passed": bool(frontal_passed),
+            "corrected_section_count": len(corrected_sections),
+            "no_central_dent": no_central_dent,
+            "no_width_expansion": no_width_expansion,
+            "sidewalls_not_moved_outward": sidewalls_not_outward,
+            "narrowing_within_mild_limit": mild_narrowing,
+            "no_center_strip_pattern": no_center_strip_pattern,
+            "slope_to_ridge_median_displacement_ratio": vault_coverage[
+                "slope_to_ridge_median_ratio"
+            ],
+            "sidewall_to_ridge_median_displacement_ratio": vault_coverage[
+                "sidewall_to_ridge_median_ratio"
+            ],
+        },
     }
 
 
@@ -980,10 +1278,12 @@ def _write_cross_section_svg(output_path: Path, diagnostic: dict[str, Any]) -> N
         offset_y = row * panel_height
         source_x = np.asarray(section["source_lateral_mm"], dtype=np.float64)
         source_y = np.asarray(section["source_anterior_mm"], dtype=np.float64)
+        target_x = np.asarray(section["target_lateral_mm"], dtype=np.float64)
+        target_y = np.asarray(section["target_anterior_mm"], dtype=np.float64)
         simulated_x = np.asarray(section["simulated_lateral_mm"], dtype=np.float64)
         simulated_y = np.asarray(section["simulated_anterior_mm"], dtype=np.float64)
-        all_x = np.concatenate([source_x, simulated_x])
-        all_y = np.concatenate([source_y, simulated_y])
+        all_x = np.concatenate([source_x, target_x, simulated_x])
+        all_y = np.concatenate([source_y, target_y, simulated_y])
         x_min, x_max = float(np.min(all_x)), float(np.max(all_x))
         y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
         x_span = max(x_max - x_min, 1e-9)
@@ -1015,6 +1315,19 @@ def _write_cross_section_svg(output_path: Path, diagnostic: dict[str, Any]) -> N
             panel_height=panel_height,
             margin=margin,
         )
+        target_points = _svg_cross_section_points(
+            target_x,
+            target_y,
+            offset_x=offset_x,
+            offset_y=offset_y,
+            x_min=x_min,
+            y_min=y_min,
+            x_span=x_span,
+            y_span=y_span,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            margin=margin,
+        )
 
         title = name.replace("_", " ")
         source_width = section["source_width_at_1_5mm_depth_mm"]
@@ -1031,6 +1344,10 @@ def _write_cross_section_svg(output_path: Path, diagnostic: dict[str, Any]) -> N
                     'stroke="#d62728" stroke-width="3"/>'
                 ),
                 (
+                    f'<polyline points="{target_points}" fill="none" '
+                    'stroke="#2ca02c" stroke-width="2" stroke-dasharray="6 4"/>'
+                ),
+                (
                     f'<polyline points="{simulated_points}" fill="none" '
                     'stroke="#1f77b4" stroke-width="3"/>'
                 ),
@@ -1041,8 +1358,8 @@ def _write_cross_section_svg(output_path: Path, diagnostic: dict[str, Any]) -> N
                 (
                     f'<text x="{offset_x + margin}" y="{offset_y + 48}" '
                     f'font-family="sans-serif" font-size="12">'
-                    f"red source {source_width:.2f} mm | "
-                    f"blue simulated {simulated_width:.2f} mm</text>"
+                    f"red source {source_width:.2f} mm | green target | "
+                    f"blue final {simulated_width:.2f} mm</text>"
                 ),
             ]
         )
@@ -1057,8 +1374,8 @@ def _write_profile_svg(output_path: Path, profile: dict[str, np.ndarray]) -> flo
     x = profile["longitudinal_mm"]
     source = profile["source_anterior_mm"]
     target = profile["target_anterior_mm"]
-    simulated = profile["simulated_anterior_mm"]
-    y_values = np.concatenate([source, target, simulated])
+    final = profile["final_anterior_mm"]
+    y_values = np.concatenate([source, target, final])
     x_span = max(float(np.ptp(x)), 1e-9)
     y_min = float(np.min(y_values))
     y_span = max(float(np.ptp(y_values)), 1e-9)
@@ -1068,16 +1385,16 @@ def _write_profile_svg(output_path: Path, profile: dict[str, np.ndarray]) -> flo
         py = height - margin - (values - y_min) / y_span * (height - 2 * margin)
         return " ".join(f"{x_value:.2f},{y_value:.2f}" for x_value, y_value in zip(px, py))
 
-    maximum_profile_change_mm = float(np.max(np.abs(source - simulated)))
+    maximum_profile_change_mm = float(np.max(np.abs(source - final)))
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
 <rect width="100%" height="100%" fill="white"/>
 <line x1="{margin}" y1="{height - margin}" x2="{width - margin}" y2="{height - margin}" stroke="#333"/>
 <line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height - margin}" stroke="#333"/>
 <polyline points="{points(target)}" fill="none" stroke="#888" stroke-width="2" stroke-dasharray="7 5"/>
 <polyline points="{points(source)}" fill="none" stroke="#d62728" stroke-width="4"/>
-<polyline points="{points(simulated)}" fill="none" stroke="#1f77b4" stroke-width="4"/>
+<polyline points="{points(final)}" fill="none" stroke="#1f77b4" stroke-width="3"/>
 <text x="{margin}" y="32" font-family="sans-serif" font-size="20">Dorsal profile diagnostic</text>
-<text x="{margin}" y="54" font-family="sans-serif" font-size="14">red: source | blue: simulation | gray dashed: target | max profile change: {maximum_profile_change_mm:.3f} mm</text>
+<text x="{margin}" y="54" font-family="sans-serif" font-size="14">red: original | gray: target | blue: final | max change: {maximum_profile_change_mm:.3f} mm</text>
 <text x="{width / 2 - 90}" y="{height - 18}" font-family="sans-serif" font-size="14">nasion to supratip (mm)</text>
 <text x="18" y="{height / 2}" font-family="sans-serif" font-size="14" transform="rotate(-90 18 {height / 2})">posterior to anterior (mm)</text>
 </svg>
@@ -1180,6 +1497,7 @@ def _write_diagnostic_renders(
     faces: np.ndarray,
     frame: dict[str, Any],
     displacement_mm: np.ndarray,
+    source_vertex_colors: np.ndarray | None = None,
 ) -> dict[str, Path]:
     import cv2
 
@@ -1194,6 +1512,12 @@ def _write_diagnostic_renders(
     source_normals = _vertex_normals(source_vertices_m, faces)
     simulated_normals = _vertex_normals(simulated_vertices_m, faces)
     displacement_mm = np.asarray(displacement_mm, dtype=np.float64)
+    texture_colors_bgr: np.ndarray | None = None
+    if source_vertex_colors is not None and len(source_vertex_colors) == len(source_vertices_m):
+        texture_rgb = np.asarray(source_vertex_colors, dtype=np.float64)
+        if float(np.max(texture_rgb)) <= 1.0:
+            texture_rgb = texture_rgb * 255.0
+        texture_colors_bgr = np.clip(texture_rgb[:, :3], 0.0, 255.0).astype(np.uint8)[:, ::-1]
     affected_vertex_mask = displacement_mm > 0.1
     anterior_axis = np.asarray(frame["anterior"])
     if float(np.median(source_normals @ anterior_axis)) < 0.0:
@@ -1225,38 +1549,42 @@ def _write_diagnostic_renders(
         source_lateral,
         source_longitudinal,
         source_anterior,
-        title="Front view - source",
+        title="Textured front view - source",
         horizontal_label="patient left to right",
         vertical_label="superior to inferior",
         vertical_increases_down=True,
+        point_colors_bgr=texture_colors_bgr,
     )
     front_after, _ = _projection_image(
         simulated_lateral,
         simulated_longitudinal,
         simulated_anterior,
-        title="Front view - simulated",
+        title="Textured front view - final",
         horizontal_label="patient left to right",
         vertical_label="superior to inferior",
         vertical_increases_down=True,
+        point_colors_bgr=texture_colors_bgr,
         bounds=front_bounds,
     )
     profile_before, profile_bounds = _projection_image(
         source_longitudinal,
         source_anterior,
         -np.abs(source_lateral),
-        title="Profile view - source",
+        title="Textured profile view - source",
         horizontal_label="nasion to inferior",
         vertical_label="posterior to anterior",
         vertical_increases_down=False,
+        point_colors_bgr=texture_colors_bgr,
     )
     profile_after, _ = _projection_image(
         simulated_longitudinal,
         simulated_anterior,
         -np.abs(simulated_lateral),
-        title="Profile view - simulated",
+        title="Textured profile view - final",
         horizontal_label="nasion to inferior",
         vertical_label="posterior to anterior",
         vertical_increases_down=False,
+        point_colors_bgr=texture_colors_bgr,
         bounds=profile_bounds,
     )
     clay_before, _ = _projection_image(
@@ -1401,6 +1729,16 @@ def _write_diagnostic_renders(
         "front_after_png": output_dir / f"reduction_{label}mm_front_after.png",
         "profile_before_png": output_dir / f"reduction_{label}mm_profile_before.png",
         "profile_after_png": output_dir / f"reduction_{label}mm_profile_after.png",
+        "textured_front_before_png": (
+            output_dir / f"reduction_{label}mm_textured_front_before.png"
+        ),
+        "textured_front_after_png": output_dir / f"reduction_{label}mm_textured_front_after.png",
+        "textured_profile_before_png": (
+            output_dir / f"reduction_{label}mm_textured_profile_before.png"
+        ),
+        "textured_profile_after_png": (
+            output_dir / f"reduction_{label}mm_textured_profile_after.png"
+        ),
         "affected_roi_render_png": output_dir / f"reduction_{label}mm_affected_roi.png",
         "clay_before_png": output_dir / f"reduction_{label}mm_clay_before.png",
         "clay_after_png": output_dir / f"reduction_{label}mm_clay_after.png",
@@ -1411,6 +1749,12 @@ def _write_diagnostic_renders(
         "moved_vertices_heatmap_png": (
             output_dir / f"reduction_{label}mm_moved_vertices_heatmap.png"
         ),
+        "front_displacement_heatmap_png": (
+            output_dir / f"reduction_{label}mm_front_displacement_heatmap.png"
+        ),
+        "profile_displacement_heatmap_png": (
+            output_dir / f"reduction_{label}mm_profile_displacement_heatmap.png"
+        ),
         "normal_before_png": output_dir / f"reduction_{label}mm_normals_before.png",
         "normal_after_png": output_dir / f"reduction_{label}mm_normals_after.png",
     }
@@ -1419,6 +1763,10 @@ def _write_diagnostic_renders(
         "front_after_png": front_after,
         "profile_before_png": profile_before,
         "profile_after_png": profile_after,
+        "textured_front_before_png": front_before,
+        "textured_front_after_png": front_after,
+        "textured_profile_before_png": profile_before,
+        "textured_profile_after_png": profile_after,
         "affected_roi_render_png": roi_highlight,
         "clay_before_png": clay_before,
         "clay_after_png": clay_after,
@@ -1427,6 +1775,8 @@ def _write_diagnostic_renders(
         "top_down_before_png": top_down_before,
         "top_down_after_png": top_down_after,
         "moved_vertices_heatmap_png": moved_vertices_heatmap,
+        "front_displacement_heatmap_png": heatmap_front,
+        "profile_displacement_heatmap_png": heatmap_profile,
         "normal_before_png": normal_before,
         "normal_after_png": normal_after,
     }
@@ -1634,9 +1984,11 @@ def simulate_dorsal_hump_reduction(
         roi_metadata,
         roi_vertex_mask,
         profile_diagnostic,
+        target_vertices_m,
     ) = _compute_dorsal_hump_deformation(vertices_m, landmarks_mm, reduction_mm, faces)
     if not roi_metadata["candidate_vertex_count"]:
         raise RuntimeError("The landmark-derived nasal dorsum ROI contains no vertices")
+    applied_reduction_mm = float(roi_metadata["profile_model"]["applied_peak_reduction_mm"])
 
     output_dir.mkdir(parents=True, exist_ok=True)
     label = _reduction_label(float(reduction_mm))
@@ -1710,6 +2062,7 @@ def simulate_dorsal_hump_reduction(
                 "schema_version": 1,
                 "units": "millimetres",
                 "detected_hump_apex": roi_metadata["detected_hump_apex"],
+                "anatomical_displacements": roi_metadata["profile_point_diagnostics"],
                 **{
                     name: np.asarray(values).round(6).tolist()
                     for name, values in profile_diagnostic.items()
@@ -1722,10 +2075,12 @@ def simulate_dorsal_hump_reduction(
     frame = _anatomical_frame(landmarks_mm)
     cross_section_diagnostic = _cross_section_diagnostics(
         vertices_m,
+        target_vertices_m,
         persisted_vertices_m,
         frame,
         float(roi_metadata["detected_hump_apex"]["normalized_nasion_to_supratip"]),
         float(roi_metadata["lateral_half_width_mm"]),
+        float(roi_metadata["profile_core_half_width_mm"]),
         float(roi_metadata["transverse_bridge_core_half_width_mm"]),
     )
     _write_cross_section_svg(output_cross_sections_svg, cross_section_diagnostic)
@@ -1734,6 +2089,13 @@ def simulate_dorsal_hump_reduction(
             {"schema_version": 1, "units": "millimetres", **cross_section_diagnostic}, indent=2
         ),
         encoding="utf-8",
+    )
+    acceptance_diagnostic = _acceptance_diagnostics(
+        profile_diagnostic,
+        cross_section_diagnostic,
+        frame,
+        applied_reduction_mm,
+        roi_metadata["vault_displacement_coverage"],
     )
     source_longitudinal, _, _ = _coordinates(vertices_m * 1000.0, frame)
     maximum_displacement_vertex = int(np.argmax(persisted_displacement_mm))
@@ -1755,13 +2117,14 @@ def simulate_dorsal_hump_reduction(
         faces,
         frame,
         persisted_displacement_mm,
+        np.asarray(source.vertex_colors) if source.has_vertex_colors() else None,
     )
 
     if float(reduction_mm) == 0.0:
         if maximum_displacement_mm != 0.0 or geometry_hash_changed:
             raise RuntimeError("A 0.0 mm simulation changed the persisted geometry")
     else:
-        minimum_meaningful_displacement_mm = 0.8 * float(reduction_mm)
+        minimum_meaningful_displacement_mm = 0.8 * applied_reduction_mm
         if maximum_displacement_mm < minimum_meaningful_displacement_mm:
             raise RuntimeError(
                 "Persisted hump displacement is not meaningfully close to the request: "
@@ -1769,7 +2132,7 @@ def simulate_dorsal_hump_reduction(
             )
         if not geometry_hash_changed or vertices_moved_over_point_one_mm == 0:
             raise RuntimeError("The non-zero simulation did not change persisted mesh geometry")
-        if maximum_profile_change_mm < 0.5 * float(reduction_mm):
+        if maximum_profile_change_mm < 0.5 * applied_reduction_mm:
             raise RuntimeError(
                 "The simulated dorsal profile did not visibly separate from the source profile"
             )
@@ -1779,12 +2142,19 @@ def simulate_dorsal_hump_reduction(
             raise RuntimeError(
                 "The supratip is receiving excessive displacement relative to the hump"
             )
+        if not acceptance_diagnostic["passed"]:
+            raise RuntimeError(
+                "The simulated geometry did not pass the profile and frontal-vault acceptance "
+                f"checks: {acceptance_diagnostic}"
+            )
 
     short_geometry_id = simulation_identity["geometry_id"].split(":", 1)[-1][:12]
     viewer_glb = output_dir / f"reduction_{label}mm_{short_geometry_id}.glb"
     manifest: dict[str, Any] = {
         "schema_version": 1,
         "operation": "dorsal_hump_reduction",
+        "solver_id": DORSAL_VAULT_SOLVER_ID,
+        "solver_module_sha256": _sha256_file(Path(__file__)),
         "status": "visual_simulation_only",
         "disclaimer": (
             "This is an aesthetic visualization, not a prediction of surgical outcome or a "
@@ -1795,14 +2165,18 @@ def simulate_dorsal_hump_reduction(
         "exact_final_glb_path": str(viewer_glb.resolve()),
         "source_geometry_unchanged": True,
         "requested_reduction_mm": float(reduction_mm),
+        "applied_profile_reduction_mm": round(applied_reduction_mm, 6),
         "maximum_actual_vertex_displacement_mm": round(maximum_displacement_mm, 6),
         "affected_vertex_count": affected_vertex_count,
         "total_vertex_count": len(vertices_m),
         "affected_nasal_roi": roi_metadata,
         "deformation": {
             "direction": (
-                "posterior profile correction plus mild medial transverse sidewall adjustment"
+                "coupled posterior-and-medial deformation of one connected dorsal vault"
             ),
+            "solve": "single vector-valued constrained biharmonic surface solve",
+            "center_strip_algorithm": False,
+            "full_vault_constraint_surface": True,
             "normal_based_displacement": False,
             "left_right_symmetrization": False,
             "topology_changed": False,
@@ -1812,6 +2186,7 @@ def simulate_dorsal_hump_reduction(
         },
         "diagnostics": {
             "requested_reduction_mm": float(reduction_mm),
+            "applied_profile_reduction_mm": round(applied_reduction_mm, 6),
             "mesh_position_units": "metres",
             "landmark_and_displacement_units": "millimetres",
             "millimetres_to_metres_scale": 0.001,
@@ -1823,7 +2198,9 @@ def simulate_dorsal_hump_reduction(
             "exported_moved_vertex_count": moved_vertex_export_count,
             "pointwise_envelope_clipping": roi_metadata["pointwise_envelope_clipping"],
             "deformation_solver": roi_metadata["deformation_solver"],
+            "profile_point_displacements": roi_metadata["profile_point_diagnostics"],
             "transverse_cross_sections": cross_section_diagnostic,
+            "acceptance": acceptance_diagnostic,
             "ply_normals": {
                 "present": ply_has_vertex_normals,
                 "recomputed_from_simulated_geometry": bool(float(reduction_mm) > 0.0),
@@ -1879,7 +2256,7 @@ def simulate_dorsal_hump_reduction(
     if float(reduction_mm) > 0.0 and not glb_diagnostics["geometry_differs_from_source"]:
         raise RuntimeError("The exported GLB contains the original rather than simulated geometry")
     if float(reduction_mm) > 0.0:
-        minimum_transverse_change_mm = 0.15 * float(reduction_mm)
+        minimum_transverse_change_mm = 0.04 * applied_reduction_mm
         if (
             glb_diagnostics["maximum_transverse_displacement_from_source_mm"]
             < minimum_transverse_change_mm

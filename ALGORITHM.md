@@ -536,42 +536,35 @@ profile is the smoothed 90th-percentile anterior envelope. A straight sagittal t
 median anchors in the proximal and distal profile bands. This prevents a broad hump from being
 absorbed into a flexible target fit. Positive convex excess above that target is the removable hump;
 non-convex profile regions receive no displacement. The apex is the maximum raw outward excess in
-the upper/mid-dorsal search band (normalized 0.08–0.72 from nasion to supratip). An apex-centered
-Gaussian and monotone piecewise boundary falloff make that point the unique displacement maximum;
-secondary lower-dorsum or supratip deviations cannot become the reduction center. The requested
-slider amount sets the apex displacement, and no vertex moves more than that amount. The reported
-available hump height is only the algorithmic excess above this constructed target; it is not an
-anatomical or clinical measurement.
+the upper/mid-dorsal search band (normalized 0.08–0.62 from nasion to supratip), so a secondary
+lower-dorsum or supratip deviation cannot become the reduction center. The applied peak is the lesser
+of the requested slider value and detected convexity. Every upper/mid profile sample receives that
+same fractional convexity reduction through the apex, followed by a C2 fade through the mid dorsum.
+This prevents the lower dorsum and supratip from receiving the full apex correction. The result never
+crosses the no-scoop reference curve. The reported available hump height is algorithmic rather than
+an anatomical or clinical measurement.
 
-The requested apex correction defines a new lateral target curve from the extracted source profile.
-For each vertex in a narrow sagittal dorsal strip, the algorithm interpolates that target at the
-vertex's longitudinal position. A vertex is eligible only when its anterior coordinate lies outside
-the target envelope. Its displacement is capped by both the distance to the envelope and the local
-profile correction. The central profile-extraction slab receives full strength; displacement then
-falls smoothly to zero before the lateral sidewalls. Membership in the broader nasal ROI alone never
-authorizes movement.
-
-Vertices move posteriorly along the landmark-derived sagittal anterior axis—not along their vertex
-normals. Smooth compact falloffs are multiplied across:
-
-- position between nasion and supratip;
-- lateral distance from the patient midline;
-- depth behind the observed dorsal envelope.
-
-Each falloff reaches zero at its boundary. The ROI ends at least 6 mm before the longitudinal tip
-position, while alar width defines a capped dorsal half-width. This protects the tip, columella,
-nostrils, alar rims, upper lip, and cheeks. A 0.0 mm request bypasses deformation and copies the
-authoritative PLY exactly.
+For each vertex of the connected dorsal vault, the simulator interpolates `delta(s)` and multiplies
+it by a smooth transverse vault weight. The ridge receives full correction, adjacent slopes retain
+more than 90%, and sidewall correction progressively approaches zero at the anatomical perimeter.
+A mild medial component peaks on the slopes/sidewalls and is capped at 0.6 mm. Both posterior and
+medial components are constraints in one vector-valued biharmonic solve; there is no center-strip
+permission mask or second independent sidewall pass. The fixed perimeter includes the nasion,
+supratip, cheeks, tip, alae, nostrils, columella, and upper lip. The solve never uses vertex normals
+or imposes left/right symmetry. A 0.0 mm request copies the authoritative PLY exactly.
 
 Outputs live under `simulations/dorsal_hump/`. `simulation.json` records the source geometry ID,
 simulation geometry ID, requested reduction, maximum persisted displacement, affected vertex
 count, median affected displacement, vertices moved over 0.1 mm, ROI definition and axes, source
 hashes, output hashes, and PLY/GLB persistence checks. An ROI-only colored PLY exposes the selected
-nasal surface. A profile SVG overlays source, target, and simulated sagittal envelopes. The notebook
-also persists the numerical profile curve, front/profile before-and-after PNG renders, and a
-front/profile ROI-highlight render. It downloads a geometry-hash-qualified GLB so external viewers
-cannot reuse a stale file with the same slider label. This is a visual aesthetic simulation, not a
-surgical-outcome prediction.
+nasal surface. Profile JSON/SVG outputs contain original, target, and final curves plus
+displacement and target error at radix/nasion, upper dorsum, hump apex, mid/lower dorsum, supratip,
+and pronasale. Four transverse sections report original/target/final curves, bridge widths, central
+heights, and left/right sidewall coordinates and medial displacement. Clay and textured front/profile
+comparisons, normal visualization, separate front/profile displacement heatmaps, and ridge/slope/
+sidewall coverage ratios are also persisted. The
+notebook downloads a geometry-hash-qualified GLB so external viewers cannot reuse a stale file with
+the same slider label. This is a visual aesthetic simulation, not a surgical-outcome prediction.
 
 ## 14. Quality decision algorithm
 
@@ -697,7 +690,11 @@ The principal outputs are:
 | `simulations/dorsal_hump/reduction_Xmm_moved_vertices.ply` | Point cloud containing only vertices actually moved |
 | `simulations/dorsal_hump/reduction_Xmm_profile.svg` | Source/simulated sagittal profile overlay |
 | `simulations/dorsal_hump/reduction_Xmm_profile.json` | Numerical source/target/simulated curves and apex |
+| `simulations/dorsal_hump/reduction_Xmm_cross_sections.svg` | Upper/hump/mid/supratip transverse overlays |
+| `simulations/dorsal_hump/reduction_Xmm_cross_sections.json` | Bridge width, height, and sidewall coordinate diagnostics |
 | `simulations/dorsal_hump/reduction_Xmm_{front,profile}_{before,after}.png` | Orthographic diagnostic renders |
+| `simulations/dorsal_hump/reduction_Xmm_{clay,profile_clay,normals}_{before,after}.png` | Geometry and normal comparisons |
+| `simulations/dorsal_hump/reduction_Xmm_moved_vertices_heatmap.png` | Front/profile displacement heatmap |
 | `simulations/dorsal_hump/reduction_Xmm_affected_roi.png` | Front/profile ROI-highlight render |
 | `simulations/dorsal_hump/simulation.json` | Simulation provenance and displacement report |
 

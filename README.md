@@ -118,6 +118,13 @@ The accepted range is 0.0–5.0 mm. This creates separate PLY, GLB, and manifest
 overwrites the authoritative mesh, landmarks, measurements, or geometry metadata. The Colab
 notebook exposes the same operation as a slider and explicit **Create simulation** button.
 
+The deformation uses one vector-valued biharmonic solve over the connected 3D dorsal vault. A smooth
+`delta(s)` target moves the ridge, adjacent slopes, and sidewalls coherently; only the anatomical
+vault perimeter is fixed. The simulation directory contains original/target/final profile curves,
+transverse sections at the upper dorsum, hump, mid dorsum, and supratip, separate front/profile
+displacement heatmaps, clay and normal comparisons, and numerical ridge/slope/sidewall coverage
+checks. If the request exceeds detected convexity, correction stops at the no-scoop reference.
+
 Use `--resume` only with unchanged inputs and parameters. `case.json` stores the capture
 fingerprint, software version, stage parameters, upstream signatures, status, and timing. A stale
 stage is rejected instead of being silently reused.

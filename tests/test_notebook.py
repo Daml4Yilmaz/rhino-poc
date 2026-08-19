@@ -19,7 +19,10 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert "using the completed Drive case" in source
     assert 'previous_button.close()' in source
     assert '"--output-dir"' in source
-    assert "completed_dorsal_requests" in source
+    assert "completed_dorsal_requests" not in source
+    assert "EXPECTED_DORSAL_SOLVER_ID" in source
+    assert "DORSAL_VAULT_SOLVER_ID" in source
+    assert "Refusing to run a stale dorsal-hump solver" in source
     assert "import json" in source
     assert "previous_button.on_click(previous_handler, remove=True)" in source
     assert "_dorsal_simulation_in_progress" in source
@@ -27,6 +30,8 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert '"affected_roi_render_png"' in source
     assert '"profile_before_png"' in source
     assert '"moved_vertices_heatmap_png"' in source
+    assert '"front_displacement_heatmap_png"' in source
+    assert '"profile_displacement_heatmap_png"' in source
 
 
 def test_poisson_diagnostic_notebook_is_valid_and_non_authoritative() -> None:
