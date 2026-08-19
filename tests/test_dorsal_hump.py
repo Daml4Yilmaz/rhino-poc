@@ -159,7 +159,8 @@ def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
 
     assert 1.9 <= float(displacement_mm.max()) <= 2.000001
     assert roi["profile_model"]["available_hump_height_mm"] >= 2.5
-    assert "proximal and distal dorsal anchors" in roi["profile_model"]["target_profile"]
+    assert "nasion and supratip anchors" in roi["profile_model"]["reference_profile"]
+    assert "apex-centered correction" in roi["profile_model"]["target_profile"]
 
 
 def test_slider_sets_peak_reduction_instead_of_detected_hump_height() -> None:
@@ -186,6 +187,20 @@ def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
     assert 12.0 <= maximum_vertex_longitudinal_mm <= 20.0
     assert float(displacement_mm.max()) >= 3.9
     assert float(displacement_mm[lower_region].max()) < 0.2
+
+
+def test_vertex_behind_target_envelope_does_not_move() -> None:
+    vertices, _, landmarks = _synthetic_face()
+    vertices_mm = vertices * 1000.0
+    protected = np.argmin(np.abs(vertices_mm[:, 0] - 4.0) + np.abs(vertices_mm[:, 1] - 22.0))
+    vertices[protected, 2] -= 0.020
+
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0)
+
+    center = np.argmin(np.abs(vertices_mm[:, 0]) + np.abs(vertices_mm[:, 1] - 22.0))
+    assert roi["vertices_outside_target_envelope"] > 0
+    assert displacement_mm[center] >= 3.8
+    assert displacement_mm[protected] == 0.0
 
 
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
@@ -223,6 +238,7 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
     assert (output / "reduction_2.0mm.glb").is_file()
     assert (output / manifest["output_paths"]["viewer_glb"]).is_file()
     assert (output / "reduction_2.0mm_affected_roi.ply").is_file()
+    assert (output / "reduction_2.0mm_moved_vertices.ply").is_file()
     assert (output / "reduction_2.0mm_profile.svg").is_file()
     assert manifest == json.loads((output / "simulation.json").read_text())
     simulated = o3d.io.read_triangle_mesh(str(output / "reduction_2.0mm.ply"))
@@ -259,6 +275,8 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert 3.8 <= diagnostics["maximum_displacement_mm"] <= 4.000001
     assert diagnostics["median_displacement_mm"] > 0.0
     assert diagnostics["vertices_moved_over_0_1_mm"] > 0
+    assert diagnostics["exported_moved_vertex_count"] == manifest["affected_vertex_count"]
+    assert (output / manifest["output_paths"]["moved_vertices_ply"]).is_file()
     assert diagnostics["source_mesh_hash"] != diagnostics["output_mesh_hash"]
     assert diagnostics["output_geometry_hash_differs_from_source"] is True
     assert diagnostics["maximum_ply_error_from_memory_mm"] < 1e-6

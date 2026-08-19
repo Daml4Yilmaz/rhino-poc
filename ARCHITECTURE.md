@@ -87,6 +87,11 @@ supratip deviation from becoming the maximum. Compact longitudinal, lateral, and
 falloffs reach zero at the ROI boundary. It does not displace along vertex normals or symmetrize the
 source face.
 
+The 3D ROI is sampling context, not deformation permission. Actual displacement is restricted to a
+narrow sagittal dorsal band and requires the vertex to lie anterior to the request-specific corrected
+profile envelope. Vertices already on or behind that envelope remain fixed, even inside the nasal
+ROI. The full-strength midline slab transitions smoothly to zero before the lateral sidewalls.
+
 The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remain untouched. UV-seam
 render vertices follow their corresponding canonical corners in the simulated GLB. A saved
 simulation records its parent `geometry_id`, its own deterministic output identity, deformation

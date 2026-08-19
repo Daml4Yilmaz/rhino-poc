@@ -140,8 +140,8 @@ def _dorsal_profile(
     profile = _smooth_series(profile)
 
     normalized = (centers - start) / (end - start)
-    proximal_anchor = (normalized >= 0.06) & (normalized <= 0.18)
-    distal_anchor = (normalized >= 0.82) & (normalized <= 0.94)
+    proximal_anchor = (normalized >= 0.02) & (normalized <= 0.12)
+    distal_anchor = (normalized >= 0.88) & (normalized <= 0.98)
     proximal_position = float(np.median(centers[proximal_anchor]))
     distal_position = float(np.median(centers[distal_anchor]))
     proximal_height = float(np.median(profile[proximal_anchor]))
@@ -208,11 +208,16 @@ def _compute_dorsal_hump_deformation(
             "cheeks",
         ],
     }
-    centers, profile, target = _dorsal_profile(longitudinal, lateral, anterior, frame)
+    centers, profile, reference_profile = _dorsal_profile(
+        longitudinal,
+        lateral,
+        anterior,
+        frame,
+    )
     start = float(frame["roi_start_mm"])
     end = float(frame["roi_end_mm"])
     normalized_centers = (centers - start) / (end - start)
-    convex_excess = np.maximum(profile - target, 0.0)
+    convex_excess = np.maximum(profile - reference_profile, 0.0)
     apex_search = (normalized_centers >= 0.08) & (normalized_centers <= 0.72)
     apex_candidates = np.flatnonzero(apex_search)
     apex_index = int(apex_candidates[np.argmax(convex_excess[apex_search])])
@@ -236,26 +241,34 @@ def _compute_dorsal_hump_deformation(
         centerline_shape = boundary_falloff * apex_falloff * convexity_weight
         centerline_shape /= centerline_shape[apex_index]
         centerline_reduction = reduction_mm * centerline_shape
+    target_profile = profile - centerline_reduction
 
-    profile_at_vertex = np.interp(longitudinal, centers, profile)
-    reduction_at_vertex = np.interp(
+    target_at_vertex = np.interp(
+        longitudinal,
+        centers,
+        target_profile,
+        left=profile[0],
+        right=profile[-1],
+    )
+    maximum_reduction_at_vertex = np.interp(
         longitudinal,
         centers,
         centerline_reduction,
         left=0.0,
         right=0.0,
     )
-    lateral_distance = np.abs(lateral) / float(frame["half_width_mm"])
-    lateral_weight = _smooth_compact_falloff(lateral_distance)
-    depth_gap = np.maximum(profile_at_vertex - anterior, 0.0)
-    surface_weight = _smooth_compact_falloff(depth_gap / float(frame["surface_depth_mm"]))
-    within_longitudinal = (longitudinal > start) & (longitudinal < end)
-    roi_vertex_mask = (
-        within_longitudinal
-        & (lateral_distance < 1.0)
-        & (depth_gap < float(frame["surface_depth_mm"]))
+    profile_core_half_width_mm = min(2.5, 0.35 * float(frame["half_width_mm"]))
+    profile_half_width_mm = min(6.0, 0.7 * float(frame["half_width_mm"]))
+    lateral_transition = np.maximum(np.abs(lateral) - profile_core_half_width_mm, 0.0) / (
+        profile_half_width_mm - profile_core_half_width_mm
     )
-    displacement_mm = reduction_at_vertex * lateral_weight * surface_weight * roi_vertex_mask
+    lateral_weight = _smooth_compact_falloff(lateral_transition)
+    lateral_distance = np.abs(lateral) / profile_half_width_mm
+    within_longitudinal = (longitudinal > start) & (longitudinal < end)
+    roi_vertex_mask = within_longitudinal & (lateral_distance < 1.0)
+    outside_target_mm = np.maximum(anterior - target_at_vertex, 0.0)
+    envelope_displacement_mm = np.minimum(outside_target_mm, maximum_reduction_at_vertex)
+    displacement_mm = envelope_displacement_mm * lateral_weight * roi_vertex_mask
     displacement_mm[displacement_mm < 1e-8] = 0.0
 
     simulated = (
@@ -263,7 +276,8 @@ def _compute_dorsal_hump_deformation(
     )
     roi_metadata["profile_model"] = {
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
-        "target_profile": "straight profile through robust proximal and distal dorsal anchors",
+        "reference_profile": "straight chord through robust nasion and supratip anchors",
+        "target_profile": "requested apex-centered correction of the extracted source profile",
         "convex_hump_only": True,
         "available_hump_height_mm": round(available_hump_mm, 6),
         "available_hump_height_is_clinical_measurement": False,
@@ -275,6 +289,11 @@ def _compute_dorsal_hump_deformation(
             "peak reduction"
         ),
     }
+    roi_metadata["profile_core_half_width_mm"] = round(profile_core_half_width_mm, 6)
+    roi_metadata["profile_deformation_half_width_mm"] = round(profile_half_width_mm, 6)
+    roi_metadata["vertices_outside_target_envelope"] = int(
+        np.count_nonzero(roi_vertex_mask & (outside_target_mm > 1e-6))
+    )
     apex_point_mm = (
         np.asarray(frame["origin"])
         + centers[apex_index] * np.asarray(frame["vertical"])
@@ -285,7 +304,8 @@ def _compute_dorsal_hump_deformation(
         "normalized_nasion_to_supratip": round(apex_normalized, 6),
         "longitudinal_mm_from_nasion": round(float(centers[apex_index]), 6),
         "source_anterior_mm": round(float(profile[apex_index]), 6),
-        "target_anterior_mm": round(float(target[apex_index]), 6),
+        "reference_anterior_mm": round(float(reference_profile[apex_index]), 6),
+        "target_anterior_mm": round(float(target_profile[apex_index]), 6),
         "outward_convexity_mm": round(available_hump_mm, 6),
         "world_position_mm": apex_point_mm.round(6).tolist(),
         "search_band_normalized": [0.08, 0.72],
@@ -302,7 +322,8 @@ def _compute_dorsal_hump_deformation(
     profile_diagnostic = {
         "longitudinal_mm": centers,
         "source_anterior_mm": profile,
-        "target_anterior_mm": target,
+        "reference_anterior_mm": reference_profile,
+        "target_anterior_mm": target_profile,
         "simulated_anterior_mm": simulated_profile,
         "centerline_reduction_mm": centerline_reduction,
     }
@@ -365,6 +386,32 @@ def _export_roi_ply(
         "vertex_count": len(used_vertices),
         "triangle_count": len(roi_faces),
     }
+
+
+def _export_moved_vertices_ply(
+    output_path: Path,
+    vertices_m: np.ndarray,
+    displacement_mm: np.ndarray,
+) -> int:
+    import open3d as o3d
+
+    moved = displacement_mm > 1e-6
+    if not np.any(moved):
+        return 0
+    peak = max(float(np.max(displacement_mm[moved])), 1e-9)
+    intensity = np.clip(displacement_mm[moved] / peak, 0.0, 1.0)
+    colors = np.column_stack(
+        [
+            0.15 + 0.85 * intensity,
+            0.15 * np.ones_like(intensity),
+            1.0 - 0.85 * intensity,
+        ]
+    )
+    point_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(vertices_m[moved]))
+    point_cloud.colors = o3d.utility.Vector3dVector(colors)
+    if not o3d.io.write_point_cloud(str(output_path), point_cloud, write_ascii=False):
+        raise RuntimeError(f"Failed to write moved-vertex diagnostic: {output_path}")
+    return int(np.count_nonzero(moved))
 
 
 def _write_profile_svg(output_path: Path, profile: dict[str, np.ndarray]) -> float:
@@ -741,6 +788,7 @@ def simulate_dorsal_hump_reduction(
     output_ply = output_dir / f"reduction_{label}mm.ply"
     output_glb = output_dir / f"reduction_{label}mm.glb"
     output_roi_ply = output_dir / f"reduction_{label}mm_affected_roi.ply"
+    output_moved_vertices_ply = output_dir / f"reduction_{label}mm_moved_vertices.ply"
     output_profile_svg = output_dir / f"reduction_{label}mm_profile.svg"
     output_profile_json = output_dir / f"reduction_{label}mm_profile.json"
     output_manifest = output_dir / "simulation.json"
@@ -782,6 +830,11 @@ def simulate_dorsal_hump_reduction(
     )
     roi_metadata["exported_diagnostic_vertex_count"] = roi_export["vertex_count"]
     roi_metadata["exported_diagnostic_triangle_count"] = roi_export["triangle_count"]
+    moved_vertex_export_count = _export_moved_vertices_ply(
+        output_moved_vertices_ply,
+        persisted_vertices_m,
+        persisted_displacement_mm,
+    )
     maximum_profile_change_mm = _write_profile_svg(output_profile_svg, profile_diagnostic)
     output_profile_json.write_text(
         json.dumps(
@@ -880,6 +933,8 @@ def simulate_dorsal_hump_reduction(
             "median_displacement_mm": round(median_displacement_mm, 6),
             "median_displacement_scope": "vertices moved more than 0.000001 mm",
             "vertices_moved_over_0_1_mm": vertices_moved_over_point_one_mm,
+            "exported_moved_vertex_count": moved_vertex_export_count,
+            "vertices_outside_target_envelope": roi_metadata["vertices_outside_target_envelope"],
             "source_mesh_hash": source_identity["geometry_id"],
             "output_mesh_hash": simulation_identity["geometry_id"],
             "output_geometry_hash_differs_from_source": geometry_hash_changed,
@@ -898,6 +953,9 @@ def simulate_dorsal_hump_reduction(
             "glb": output_glb.name,
             "viewer_glb": viewer_glb.name,
             "affected_roi_ply": output_roi_ply.name,
+            "moved_vertices_ply": (
+                output_moved_vertices_ply.name if moved_vertex_export_count else None
+            ),
             "profile_comparison_svg": output_profile_svg.name,
             "profile_curve_json": output_profile_json.name,
             **{name: path.name for name, path in render_paths.items()},
@@ -932,6 +990,10 @@ def simulate_dorsal_hump_reduction(
         "profile_curve_json": _sha256_file(output_profile_json),
         **{name: _sha256_file(path) for name, path in render_paths.items()},
     }
+    if moved_vertex_export_count:
+        manifest["output_file_sha256"]["moved_vertices_ply"] = _sha256_file(
+            output_moved_vertices_ply
+        )
     output_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     get_logger().info(
         "Dorsal hump simulation | requested %.1f mm | actual %.3f mm | %d vertices | %s",

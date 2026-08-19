@@ -543,6 +543,14 @@ slider amount sets the apex displacement, and no vertex moves more than that amo
 available hump height is only the algorithmic excess above this constructed target; it is not an
 anatomical or clinical measurement.
 
+The requested apex correction defines a new lateral target curve from the extracted source profile.
+For each vertex in a narrow sagittal dorsal strip, the algorithm interpolates that target at the
+vertex's longitudinal position. A vertex is eligible only when its anterior coordinate lies outside
+the target envelope. Its displacement is capped by both the distance to the envelope and the local
+profile correction. The central profile-extraction slab receives full strength; displacement then
+falls smoothly to zero before the lateral sidewalls. Membership in the broader nasal ROI alone never
+authorizes movement.
+
 Vertices move posteriorly along the landmark-derived sagittal anterior axis—not along their vertex
 normals. Smooth compact falloffs are multiplied across:
 
@@ -686,6 +694,7 @@ The principal outputs are:
 | `simulations/dorsal_hump/reduction_Xmm.glb` | Separate simulated visual asset |
 | `simulations/dorsal_hump/reduction_Xmm_<hash>.glb` | Cache-safe copy for viewing/downloading |
 | `simulations/dorsal_hump/reduction_Xmm_affected_roi.ply` | Colored nasal ROI diagnostic |
+| `simulations/dorsal_hump/reduction_Xmm_moved_vertices.ply` | Point cloud containing only vertices actually moved |
 | `simulations/dorsal_hump/reduction_Xmm_profile.svg` | Source/simulated sagittal profile overlay |
 | `simulations/dorsal_hump/reduction_Xmm_profile.json` | Numerical source/target/simulated curves and apex |
 | `simulations/dorsal_hump/reduction_Xmm_{front,profile}_{before,after}.png` | Orthographic diagnostic renders |
