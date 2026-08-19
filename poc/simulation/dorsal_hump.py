@@ -2300,14 +2300,36 @@ def simulate_dorsal_hump_reduction(
     if float(reduction_mm) > 0.0 and not glb_diagnostics["geometry_differs_from_source"]:
         raise RuntimeError("The exported GLB contains the original rather than simulated geometry")
     if float(reduction_mm) > 0.0:
-        minimum_transverse_change_mm = 0.04 * applied_reduction_mm
-        if (
+        expected_transverse_change_mm = float(
+            roi_metadata["transverse_model"]["actual_maximum_medial_adjustment_mm"]
+        )
+        # This is an export-integrity check, not a second anatomical minimum.
+        # Small applied hump corrections intentionally request less than 0.1 mm
+        # of medial adjustment, so requiring a vertex above that fixed value is
+        # impossible. Verify that the GLB preserves the solved transverse field
+        # to within the PLY/GLB persistence tolerance instead.
+        minimum_transverse_change_mm = max(
+            1e-5,
+            expected_transverse_change_mm - 0.002,
+        )
+        actual_transverse_change_mm = float(
             glb_diagnostics["maximum_transverse_displacement_from_source_mm"]
-            < minimum_transverse_change_mm
-            or glb_diagnostics["vertices_with_transverse_change_over_0_1_mm"] == 0
-        ):
+        )
+        transverse_change_verified = (
+            actual_transverse_change_mm >= minimum_transverse_change_mm
+        )
+        glb_diagnostics["expected_transverse_displacement_from_solver_mm"] = (
+            expected_transverse_change_mm
+        )
+        glb_diagnostics["minimum_verified_transverse_displacement_mm"] = (
+            minimum_transverse_change_mm
+        )
+        glb_diagnostics["transverse_change_verified"] = transverse_change_verified
+        if not transverse_change_verified:
             raise RuntimeError(
-                "The exported GLB does not contain a meaningful transverse bridge change"
+                "The exported GLB did not preserve the solved transverse bridge change: "
+                f"{actual_transverse_change_mm:.6f} mm exported, "
+                f"{expected_transverse_change_mm:.6f} mm solved"
             )
     manifest["diagnostics"]["glb_export"] = glb_diagnostics
     shutil.copy2(output_glb, viewer_glb)

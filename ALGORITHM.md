@@ -568,6 +568,9 @@ comparisons, normal visualization, separate front/profile displacement heatmaps,
 sidewall coverage ratios are also persisted. The
 notebook downloads a geometry-hash-qualified GLB so external viewers cannot reuse a stale file with
 the same slider label. This is a visual aesthetic simulation, not a surgical-outcome prediction.
+GLB transverse verification compares the exported maximum directly with the solved medial field to
+within a 0.002 mm persistence tolerance; it does not require a fixed 0.1 mm movement when the applied
+profile correction intentionally produces a smaller transverse request.
 
 ## 14. Quality decision algorithm
 

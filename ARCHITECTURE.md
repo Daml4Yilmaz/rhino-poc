@@ -103,8 +103,9 @@ simulation records its parent `geometry_id`, its own deterministic output identi
 parameters, affected vertex count, and explicit non-clinical status. At 0.0 mm, the simulated PLY
 is a byte-for-byte copy of the authoritative PLY. Non-zero export is rejected unless the persisted
 PLY hash differs, displacement is meaningfully close to the applied correction, the sagittal
-profiles separate, the transverse GLB coordinates change, and the reloaded GLB corners match the
-simulated authoritative surface. Profile curves, named profile-point displacements, four transverse
+profiles separate, the transverse GLB coordinates preserve the solved medial field within 0.002 mm,
+and the reloaded GLB corners match the simulated authoritative surface. Profile curves, named
+profile-point displacements, four transverse
 sections, clay/normal renders, and a moved-vertex heatmap are persisted for audit. Viewer downloads
 use the simulation geometry hash in the filename to avoid stale-file ambiguity.
 

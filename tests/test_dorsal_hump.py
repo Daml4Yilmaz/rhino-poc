@@ -564,6 +564,27 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert manifest["output_file_sha256"]["viewer_glb"] == _sha256(viewer_glb)
 
 
+def test_submillimeter_request_preserves_small_transverse_change_in_glb(tmp_path: Path) -> None:
+    case, _, _, _ = _case(tmp_path)
+    output = case / "simulations" / "dorsal_hump"
+
+    manifest = simulate_dorsal_hump_reduction(
+        case / "face_geometry.ply",
+        case / "geometry.json",
+        case / "landmarks.json",
+        output,
+        reduction_mm=0.5,
+        source_glb_path=case / "face_model.glb",
+    )
+
+    transverse = manifest["diagnostics"]["glb_export"]
+    assert manifest["applied_profile_reduction_mm"] == 0.5
+    assert transverse["expected_transverse_displacement_from_solver_mm"] < 0.1
+    assert transverse["vertices_with_transverse_change_over_0_1_mm"] == 0
+    assert transverse["maximum_transverse_displacement_from_source_mm"] > 0.0
+    assert transverse["transverse_change_verified"] is True
+
+
 def test_persisted_zero_reduction_ply_is_byte_identical_to_source(tmp_path: Path) -> None:
     case, _, _, _ = _case(tmp_path)
     source = case / "face_geometry.ply"
