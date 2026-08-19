@@ -26,6 +26,10 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert "import json" in source
     assert "previous_button.on_click(previous_handler, remove=True)" in source
     assert "_dorsal_simulation_in_progress" in source
+    assert "pip\", \"uninstall\", \"-y\", \"rhino-poc" in source
+    assert "checkout_solver_hash" in source
+    assert "installed_solver_hash" in source
+    assert "_dorsal_last_finished_at" in source
     assert '"viewer_glb"' in source
     assert '"affected_roi_render_png"' in source
     assert '"profile_before_png"' in source
