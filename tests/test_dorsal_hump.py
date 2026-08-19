@@ -44,8 +44,8 @@ def _synthetic_face(
     return vertices_mm / 1000.0, np.asarray(faces, dtype=np.int64), landmarks
 
 
-def _synthetic_broad_hump() -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    vertices, _, landmarks = _synthetic_face()
+def _synthetic_broad_hump() -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
+    vertices, faces, landmarks = _synthetic_face()
     vertices_mm = vertices * 1000.0
     longitudinal = vertices_mm[:, 1]
     phase = np.clip(longitudinal / 42.0, 0.0, 1.0)
@@ -57,18 +57,20 @@ def _synthetic_broad_hump() -> tuple[np.ndarray, dict[str, np.ndarray]]:
         - 0.018 * vertices_mm[:, 0] ** 2
         + 0.35 * (vertices_mm[:, 0] / 16.0)
     )
-    return vertices_mm / 1000.0, landmarks
+    return vertices_mm / 1000.0, faces, landmarks
 
 
-def _synthetic_upper_hump_with_larger_supratip_bulge() -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    vertices, _, landmarks = _synthetic_face(hump_height_mm=0.0)
+def _synthetic_upper_hump_with_larger_supratip_bulge() -> tuple[
+    np.ndarray, np.ndarray, dict[str, np.ndarray]
+]:
+    vertices, faces, landmarks = _synthetic_face(hump_height_mm=0.0)
     vertices_mm = vertices * 1000.0
     lateral = vertices_mm[:, 0]
     longitudinal = vertices_mm[:, 1]
     upper_hump = 2.7 * np.exp(-0.5 * ((longitudinal - 16.0) / 4.5) ** 2)
     lower_bulge = 4.0 * np.exp(-0.5 * ((longitudinal - 35.0) / 3.0) ** 2)
     vertices_mm[:, 2] = 0.32 * longitudinal + upper_hump + lower_bulge - 0.018 * lateral**2
-    return vertices_mm / 1000.0, landmarks
+    return vertices_mm / 1000.0, faces, landmarks
 
 
 def _write_mesh(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
@@ -128,18 +130,20 @@ def _case(tmp_path: Path) -> tuple[Path, np.ndarray, np.ndarray, dict[str, np.nd
 
 
 def test_zero_reduction_is_exactly_identical() -> None:
-    vertices, _, landmarks = _synthetic_face()
+    vertices, faces, landmarks = _synthetic_face()
 
-    simulated, displacement_mm, _ = compute_dorsal_hump_deformation(vertices, landmarks, 0.0)
+    simulated, displacement_mm, _ = compute_dorsal_hump_deformation(vertices, landmarks, 0.0, faces)
 
     assert np.array_equal(simulated, vertices)
     assert np.array_equal(displacement_mm, np.zeros(len(vertices)))
 
 
 def test_reduction_flattens_only_dorsal_roi_and_preserves_tip() -> None:
-    vertices, _, landmarks = _synthetic_face()
+    vertices, faces, landmarks = _synthetic_face()
 
-    simulated, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 2.0)
+    simulated, displacement_mm, roi = compute_dorsal_hump_deformation(
+        vertices, landmarks, 2.0, faces
+    )
     original_mm = vertices * 1000.0
     simulated_mm = simulated * 1000.0
 
@@ -153,9 +157,9 @@ def test_reduction_flattens_only_dorsal_roi_and_preserves_tip() -> None:
 
 
 def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
-    vertices, landmarks = _synthetic_broad_hump()
+    vertices, faces, landmarks = _synthetic_broad_hump()
 
-    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 2.0)
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 2.0, faces)
 
     assert 1.9 <= float(displacement_mm.max()) <= 2.000001
     assert roi["profile_model"]["available_hump_height_mm"] >= 2.5
@@ -164,9 +168,9 @@ def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
 
 
 def test_slider_sets_peak_reduction_instead_of_detected_hump_height() -> None:
-    vertices, _, landmarks = _synthetic_face(hump_height_mm=0.5)
+    vertices, faces, landmarks = _synthetic_face(hump_height_mm=0.5)
 
-    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 5.0)
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 5.0, faces)
 
     assert roi["profile_model"]["available_hump_height_mm"] < 1.0
     assert roi["profile_model"]["available_hump_height_is_clinical_measurement"] is False
@@ -175,9 +179,9 @@ def test_slider_sets_peak_reduction_instead_of_detected_hump_height() -> None:
 
 
 def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
-    vertices, landmarks = _synthetic_upper_hump_with_larger_supratip_bulge()
+    vertices, faces, landmarks = _synthetic_upper_hump_with_larger_supratip_bulge()
 
-    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0)
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0, faces)
 
     longitudinal_mm = vertices[:, 1] * 1000.0
     apex = roi["detected_hump_apex"]
@@ -186,21 +190,41 @@ def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
     assert 12.0 <= apex["longitudinal_mm_from_nasion"] <= 20.0
     assert 12.0 <= maximum_vertex_longitudinal_mm <= 20.0
     assert float(displacement_mm.max()) >= 3.9
-    assert float(displacement_mm[lower_region].max()) < 0.2
+    assert float(displacement_mm[lower_region].max()) < 0.5 * float(displacement_mm.max())
 
 
-def test_vertex_behind_target_envelope_does_not_move() -> None:
-    vertices, _, landmarks = _synthetic_face()
+def test_connected_profile_vertex_is_not_left_fixed_by_pointwise_clipping() -> None:
+    vertices, faces, landmarks = _synthetic_face()
     vertices_mm = vertices * 1000.0
-    protected = np.argmin(np.abs(vertices_mm[:, 0] - 4.0) + np.abs(vertices_mm[:, 1] - 22.0))
-    vertices[protected, 2] -= 0.020
+    depressed = np.argmin(np.abs(vertices_mm[:, 0]) + np.abs(vertices_mm[:, 1] - 22.0))
+    vertices[depressed, 2] -= 0.002
 
-    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0)
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0, faces)
 
-    center = np.argmin(np.abs(vertices_mm[:, 0]) + np.abs(vertices_mm[:, 1] - 22.0))
-    assert roi["vertices_outside_target_envelope"] > 0
-    assert displacement_mm[center] >= 3.8
-    assert displacement_mm[protected] == 0.0
+    assert roi["pointwise_envelope_clipping"] is False
+    assert roi["deformation_solver"]["method"] == "biharmonic_laplacian_scalar_field"
+    assert displacement_mm[depressed] > 3.5
+
+
+def test_profile_correction_is_continuous_without_a_scooped_section() -> None:
+    vertices, faces, landmarks = _synthetic_face()
+
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 4.0, faces)
+
+    vertices_mm = vertices * 1000.0
+    midline = np.abs(vertices_mm[:, 0]) < 0.1
+    order = np.argsort(vertices_mm[midline, 1])
+    ridge_displacement = displacement_mm[midline][order]
+    active = ridge_displacement > 0.05
+    active_values = ridge_displacement[active]
+    assert len(active_values) > 20
+    assert np.max(np.abs(np.diff(active_values))) < 0.45
+    assert np.max(np.abs(np.diff(active_values, n=2))) < 0.12
+    solver = roi["deformation_solver"]
+    assert solver["profile_constraint_vertex_count"] > 0
+    assert solver["fixed_boundary_vertex_count"] > 0
+    assert solver["p95_neighbor_displacement_change_mm"] < 1.0
+    assert solver["maximum_neighbor_displacement_change_mm"] < 1.1
 
 
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
@@ -296,7 +320,9 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     roi_mesh = o3d.io.read_triangle_mesh(str(output / manifest["output_paths"]["affected_roi_ply"]))
     roi_vertices_mm = np.asarray(roi_mesh.vertices) * 1000.0
     assert 0 < len(roi_vertices_mm) < len(source_vertices)
-    assert np.max(np.abs(roi_vertices_mm[:, 0])) <= 10.1
+    assert np.max(np.abs(roi_vertices_mm[:, 0])) <= (
+        manifest["affected_nasal_roi"]["lateral_half_width_mm"] + 0.1
+    )
     assert np.max(roi_vertices_mm[:, 1]) < 42.0
 
     profile_svg = (output / manifest["output_paths"]["profile_comparison_svg"]).read_text()

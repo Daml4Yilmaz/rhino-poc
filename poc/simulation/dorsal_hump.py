@@ -156,15 +156,157 @@ def _smooth_compact_falloff(normalized_distance: np.ndarray) -> np.ndarray:
     return inside * inside * (3.0 - 2.0 * inside)
 
 
-def _smoothstep01(value: np.ndarray) -> np.ndarray:
+def _smootherstep01(value: np.ndarray) -> np.ndarray:
+    """C2-continuous interpolation with zero slope and curvature at both ends."""
     clipped = np.clip(value, 0.0, 1.0)
-    return clipped * clipped * (3.0 - 2.0 * clipped)
+    return clipped**3 * (clipped * (clipped * 6.0 - 15.0) + 10.0)
+
+
+def _continuous_profile_correction(
+    normalized_position: np.ndarray,
+    apex_normalized: float,
+    reduction_mm: float,
+) -> np.ndarray:
+    """Return one continuous nasion-to-supratip correction curve.
+
+    The two quintic Hermite segments meet at the hump apex with matching zero
+    first and second derivatives. This avoids the local on/off behavior that
+    produced a scoop at the edge of the old pointwise target envelope.
+    """
+    if reduction_mm == 0.0:
+        return np.zeros_like(normalized_position, dtype=np.float64)
+    proximal = _smootherstep01(normalized_position / apex_normalized)
+    distal = _smootherstep01((1.0 - normalized_position) / (1.0 - apex_normalized))
+    shape = np.where(normalized_position <= apex_normalized, proximal, distal)
+    return float(reduction_mm) * shape
+
+
+def _mesh_edges(faces: np.ndarray, vertex_count: int) -> np.ndarray:
+    faces = np.asarray(faces, dtype=np.int64)
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("Simulation topology must contain Nx3 triangle indices")
+    if len(faces) == 0 or np.min(faces) < 0 or np.max(faces) >= vertex_count:
+        raise ValueError("Simulation topology contains no usable triangles or invalid indices")
+    edges = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    edges.sort(axis=1)
+    return np.unique(edges, axis=0)
+
+
+def _connected_dorsal_component(
+    candidate_mask: np.ndarray,
+    edges: np.ndarray,
+    seed_vertex: int,
+) -> np.ndarray:
+    """Keep only the connected candidate surface containing the detected apex."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    candidates = np.flatnonzero(candidate_mask)
+    local_index = np.full(len(candidate_mask), -1, dtype=np.int64)
+    local_index[candidates] = np.arange(len(candidates), dtype=np.int64)
+    active_edges = edges[candidate_mask[edges[:, 0]] & candidate_mask[edges[:, 1]]]
+    if not len(active_edges):
+        raise RuntimeError("The nasal dorsum ROI contains no connected mesh edges")
+    row = np.concatenate([local_index[active_edges[:, 0]], local_index[active_edges[:, 1]]])
+    column = np.concatenate([local_index[active_edges[:, 1]], local_index[active_edges[:, 0]]])
+    adjacency = coo_matrix(
+        (np.ones(len(row), dtype=np.float64), (row, column)),
+        shape=(len(candidates), len(candidates)),
+    ).tocsr()
+    _, labels = connected_components(adjacency, directed=False)
+    seed_local = int(local_index[seed_vertex])
+    if seed_local < 0:
+        raise RuntimeError("The detected dorsal apex is outside the connected nasal ROI")
+    connected = np.zeros_like(candidate_mask)
+    connected[candidates[labels == labels[seed_local]]] = True
+    return connected
+
+
+def _laplacian_profile_deformation(
+    *,
+    faces: np.ndarray,
+    roi_vertex_mask: np.ndarray,
+    boundary_mask: np.ndarray,
+    profile_constraint_mask: np.ndarray,
+    desired_profile_displacement_mm: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit a smooth scalar displacement field over the connected dorsal surface."""
+    from scipy.sparse import coo_matrix, diags, eye
+    from scipy.sparse.linalg import spsolve
+
+    edges = _mesh_edges(faces, len(roi_vertex_mask))
+    roi_vertices = np.flatnonzero(roi_vertex_mask)
+    local_index = np.full(len(roi_vertex_mask), -1, dtype=np.int64)
+    local_index[roi_vertices] = np.arange(len(roi_vertices), dtype=np.int64)
+    active_edges = edges[roi_vertex_mask[edges[:, 0]] & roi_vertex_mask[edges[:, 1]]]
+    if not len(active_edges):
+        raise RuntimeError("The connected nasal dorsum ROI contains no triangle edges")
+
+    edge_u = local_index[active_edges[:, 0]]
+    edge_v = local_index[active_edges[:, 1]]
+    row = np.concatenate([edge_u, edge_v])
+    column = np.concatenate([edge_v, edge_u])
+    adjacency = coo_matrix(
+        (np.ones(len(row), dtype=np.float64), (row, column)),
+        shape=(len(roi_vertices), len(roi_vertices)),
+    ).tocsr()
+    degree = np.asarray(adjacency.sum(axis=1)).ravel()
+    inverse_sqrt_degree = 1.0 / np.sqrt(np.maximum(degree, 1.0))
+    normalized_laplacian = eye(len(roi_vertices), format="csr") - (
+        diags(inverse_sqrt_degree) @ adjacency @ diags(inverse_sqrt_degree)
+    )
+
+    local_boundary = boundary_mask[roi_vertices]
+    local_profile = profile_constraint_mask[roi_vertices] & ~local_boundary
+    if np.count_nonzero(local_profile) < 3:
+        raise RuntimeError(
+            "Too few dorsal-profile vertices are available as deformation constraints"
+        )
+    if np.count_nonzero(local_boundary) < 3:
+        raise RuntimeError("Too few ROI boundary vertices are available to protect nearby anatomy")
+
+    # This biharmonic scalar solve behaves like a thin elastic sheet: the ridge
+    # follows the corrected profile, the anatomical boundary remains fixed, and
+    # unconstrained vertices move coherently with their connected neighbours.
+    constraint_weight = np.zeros(len(roi_vertices), dtype=np.float64)
+    constraint_target = np.zeros(len(roi_vertices), dtype=np.float64)
+    constraint_weight[local_profile] = 2500.0
+    constraint_target[local_profile] = desired_profile_displacement_mm[roi_vertices[local_profile]]
+    constraint_weight[local_boundary] = 10000.0
+    system = (
+        normalized_laplacian.T @ normalized_laplacian
+        + diags(constraint_weight)
+        + eye(len(roi_vertices), format="csr") * 1e-9
+    ).tocsc()
+    local_displacement = np.asarray(
+        spsolve(system, constraint_weight * constraint_target), dtype=np.float64
+    )
+    if not np.all(np.isfinite(local_displacement)):
+        raise RuntimeError("Laplacian dorsal deformation did not converge to finite positions")
+    maximum_target = float(np.max(desired_profile_displacement_mm))
+    local_displacement = np.clip(local_displacement, 0.0, maximum_target)
+    local_displacement[local_boundary] = 0.0
+    displacement_mm = np.zeros(len(roi_vertex_mask), dtype=np.float64)
+    displacement_mm[roi_vertices] = local_displacement
+    displacement_mm[displacement_mm < 1e-8] = 0.0
+
+    edge_change = np.abs(displacement_mm[active_edges[:, 0]] - displacement_mm[active_edges[:, 1]])
+    diagnostics = {
+        "method": "biharmonic_laplacian_scalar_field",
+        "connected_roi_vertex_count": len(roi_vertices),
+        "profile_constraint_vertex_count": int(np.count_nonzero(local_profile)),
+        "fixed_boundary_vertex_count": int(np.count_nonzero(local_boundary)),
+        "maximum_neighbor_displacement_change_mm": round(float(np.max(edge_change)), 6),
+        "p95_neighbor_displacement_change_mm": round(float(np.percentile(edge_change, 95)), 6),
+    }
+    return displacement_mm, diagnostics
 
 
 def _compute_dorsal_hump_deformation(
     vertices_m: np.ndarray,
     landmarks_mm: dict[str, np.ndarray],
     reduction_mm: float,
+    faces: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any], np.ndarray, dict[str, np.ndarray]]:
     """Compute deformation plus internal ROI/profile diagnostics without mutating inputs."""
     reduction_mm = float(reduction_mm)
@@ -225,32 +367,21 @@ def _compute_dorsal_hump_deformation(
     apex_normalized = float(normalized_centers[apex_index])
     if reduction_mm > 0.0 and available_hump_mm <= 1e-6:
         raise RuntimeError("No positive upper/mid-dorsal convexity was found for hump reduction")
-    if reduction_mm == 0.0:
-        centerline_reduction = np.zeros_like(convex_excess)
-    else:
-        proximal_boundary = _smoothstep01(normalized_centers / apex_normalized)
-        distal_boundary = _smoothstep01((1.0 - normalized_centers) / (1.0 - apex_normalized))
-        boundary_falloff = np.where(
-            normalized_centers <= apex_normalized,
-            proximal_boundary,
-            distal_boundary,
-        )
-        apex_sigma = 0.18
-        apex_falloff = np.exp(-0.5 * ((normalized_centers - apex_normalized) / apex_sigma) ** 2)
-        convexity_weight = 0.2 + 0.8 * np.clip(convex_excess / available_hump_mm, 0.0, 1.0)
-        centerline_shape = boundary_falloff * apex_falloff * convexity_weight
-        centerline_shape /= centerline_shape[apex_index]
-        centerline_reduction = reduction_mm * centerline_shape
+    centerline_reduction = _continuous_profile_correction(
+        normalized_centers,
+        apex_normalized,
+        reduction_mm,
+    )
     target_profile = profile - centerline_reduction
 
-    target_at_vertex = np.interp(
+    source_profile_at_vertex = np.interp(
         longitudinal,
         centers,
-        target_profile,
+        profile,
         left=profile[0],
         right=profile[-1],
     )
-    maximum_reduction_at_vertex = np.interp(
+    desired_profile_displacement_mm = np.interp(
         longitudinal,
         centers,
         centerline_reduction,
@@ -258,18 +389,84 @@ def _compute_dorsal_hump_deformation(
         right=0.0,
     )
     profile_core_half_width_mm = min(2.5, 0.35 * float(frame["half_width_mm"]))
-    profile_half_width_mm = min(6.0, 0.7 * float(frame["half_width_mm"]))
+    profile_half_width_mm = min(14.0, 1.35 * float(frame["half_width_mm"]))
     lateral_transition = np.maximum(np.abs(lateral) - profile_core_half_width_mm, 0.0) / (
         profile_half_width_mm - profile_core_half_width_mm
     )
     lateral_weight = _smooth_compact_falloff(lateral_transition)
     lateral_distance = np.abs(lateral) / profile_half_width_mm
     within_longitudinal = (longitudinal > start) & (longitudinal < end)
-    roi_vertex_mask = within_longitudinal & (lateral_distance < 1.0)
-    outside_target_mm = np.maximum(anterior - target_at_vertex, 0.0)
-    envelope_displacement_mm = np.minimum(outside_target_mm, maximum_reduction_at_vertex)
-    displacement_mm = envelope_displacement_mm * lateral_weight * roi_vertex_mask
-    displacement_mm[displacement_mm < 1e-8] = 0.0
+    surface_gap_mm = source_profile_at_vertex - anterior
+    surface_band = (surface_gap_mm >= -1.5) & (surface_gap_mm <= float(frame["surface_depth_mm"]))
+    candidate_roi_mask = within_longitudinal & (lateral_distance < 1.0) & surface_band
+
+    deformation_solver: dict[str, Any]
+    if reduction_mm == 0.0:
+        roi_vertex_mask = candidate_roi_mask
+        displacement_mm = np.zeros(len(vertices_m), dtype=np.float64)
+        deformation_solver = {
+            "method": "identity_zero_reduction",
+            "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
+            "profile_constraint_vertex_count": 0,
+            "fixed_boundary_vertex_count": 0,
+            "maximum_neighbor_displacement_change_mm": 0.0,
+            "p95_neighbor_displacement_change_mm": 0.0,
+        }
+    elif faces is None:
+        # Compatibility fallback for callers that only have a point array. The
+        # production path always supplies triangle topology and uses the sparse
+        # Laplacian solve below.
+        roi_vertex_mask = candidate_roi_mask
+        displacement_mm = desired_profile_displacement_mm * lateral_weight * roi_vertex_mask
+        displacement_mm[displacement_mm < 1e-8] = 0.0
+        deformation_solver = {
+            "method": "continuous_profile_with_analytic_lateral_falloff_no_topology",
+            "connected_roi_vertex_count": int(np.count_nonzero(roi_vertex_mask)),
+            "profile_constraint_vertex_count": int(
+                np.count_nonzero(roi_vertex_mask & (np.abs(lateral) <= profile_core_half_width_mm))
+            ),
+            "fixed_boundary_vertex_count": 0,
+            "maximum_neighbor_displacement_change_mm": None,
+            "p95_neighbor_displacement_change_mm": None,
+        }
+    else:
+        edges = _mesh_edges(faces, len(vertices_m))
+        apex_vertex_score = (
+            np.abs(longitudinal - centers[apex_index])
+            + 2.0 * np.abs(lateral)
+            + np.abs(anterior - profile[apex_index])
+        )
+        apex_vertex_score[~candidate_roi_mask] = np.inf
+        if not np.any(np.isfinite(apex_vertex_score)):
+            raise RuntimeError("The detected hump apex has no vertices in the nasal surface band")
+        apex_vertex = int(np.argmin(apex_vertex_score))
+        roi_vertex_mask = _connected_dorsal_component(candidate_roi_mask, edges, apex_vertex)
+        edge_has_outside_neighbor = np.zeros(len(vertices_m), dtype=bool)
+        crossing_edges = edges[roi_vertex_mask[edges[:, 0]] != roi_vertex_mask[edges[:, 1]]]
+        if len(crossing_edges):
+            inside_endpoints = np.where(
+                roi_vertex_mask[crossing_edges[:, 0]], crossing_edges[:, 0], crossing_edges[:, 1]
+            )
+            edge_has_outside_neighbor[inside_endpoints] = True
+        normalized_vertex_position = (longitudinal - start) / (end - start)
+        boundary_mask = roi_vertex_mask & (
+            edge_has_outside_neighbor
+            | (normalized_vertex_position <= 0.04)
+            | (normalized_vertex_position >= 0.96)
+            | (lateral_distance >= 0.88)
+        )
+        profile_constraint_mask = (
+            roi_vertex_mask
+            & (np.abs(lateral) <= profile_core_half_width_mm)
+            & (np.abs(surface_gap_mm) <= 1.25)
+        )
+        displacement_mm, deformation_solver = _laplacian_profile_deformation(
+            faces=np.asarray(faces, dtype=np.int64),
+            roi_vertex_mask=roi_vertex_mask,
+            boundary_mask=boundary_mask,
+            profile_constraint_mask=profile_constraint_mask,
+            desired_profile_displacement_mm=desired_profile_displacement_mm,
+        )
 
     simulated = (
         vertices_m - displacement_mm[:, None] * np.asarray(frame["anterior"])[None, :] / 1000.0
@@ -277,7 +474,10 @@ def _compute_dorsal_hump_deformation(
     roi_metadata["profile_model"] = {
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
         "reference_profile": "straight chord through robust nasion and supratip anchors",
-        "target_profile": "requested apex-centered correction of the extracted source profile",
+        "target_profile": (
+            "C2-continuous apex-centered correction using a quintic curve from nasion through "
+            "the detected apex to supratip"
+        ),
         "convex_hump_only": True,
         "available_hump_height_mm": round(available_hump_mm, 6),
         "available_hump_height_is_clinical_measurement": False,
@@ -291,9 +491,10 @@ def _compute_dorsal_hump_deformation(
     }
     roi_metadata["profile_core_half_width_mm"] = round(profile_core_half_width_mm, 6)
     roi_metadata["profile_deformation_half_width_mm"] = round(profile_half_width_mm, 6)
-    roi_metadata["vertices_outside_target_envelope"] = int(
-        np.count_nonzero(roi_vertex_mask & (outside_target_mm > 1e-6))
-    )
+    roi_metadata["landmark_estimated_dorsal_half_width_mm"] = roi_metadata["lateral_half_width_mm"]
+    roi_metadata["lateral_half_width_mm"] = round(profile_half_width_mm, 6)
+    roi_metadata["deformation_solver"] = deformation_solver
+    roi_metadata["pointwise_envelope_clipping"] = False
     apex_point_mm = (
         np.asarray(frame["origin"])
         + centers[apex_index] * np.asarray(frame["vertical"])
@@ -334,12 +535,14 @@ def compute_dorsal_hump_deformation(
     vertices_m: np.ndarray,
     landmarks_mm: dict[str, np.ndarray],
     reduction_mm: float,
+    faces: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Return simulated vertices and displacement magnitudes without mutating input arrays."""
     simulated, displacement_mm, roi_metadata, _, _ = _compute_dorsal_hump_deformation(
         vertices_m,
         landmarks_mm,
         reduction_mm,
+        faces,
     )
     return simulated, displacement_mm, roi_metadata
 
@@ -779,7 +982,7 @@ def simulate_dorsal_hump_reduction(
         roi_metadata,
         roi_vertex_mask,
         profile_diagnostic,
-    ) = _compute_dorsal_hump_deformation(vertices_m, landmarks_mm, reduction_mm)
+    ) = _compute_dorsal_hump_deformation(vertices_m, landmarks_mm, reduction_mm, faces)
     if not roi_metadata["candidate_vertex_count"]:
         raise RuntimeError("The landmark-derived nasal dorsum ROI contains no vertices")
 
@@ -934,7 +1137,8 @@ def simulate_dorsal_hump_reduction(
             "median_displacement_scope": "vertices moved more than 0.000001 mm",
             "vertices_moved_over_0_1_mm": vertices_moved_over_point_one_mm,
             "exported_moved_vertex_count": moved_vertex_export_count,
-            "vertices_outside_target_envelope": roi_metadata["vertices_outside_target_envelope"],
+            "pointwise_envelope_clipping": roi_metadata["pointwise_envelope_clipping"],
+            "deformation_solver": roi_metadata["deformation_solver"],
             "source_mesh_hash": source_identity["geometry_id"],
             "output_mesh_hash": simulation_identity["geometry_id"],
             "output_geometry_hash_differs_from_source": geometry_hash_changed,
