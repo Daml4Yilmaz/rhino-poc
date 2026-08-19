@@ -151,7 +151,7 @@ def test_reduction_flattens_only_dorsal_roi_and_preserves_tip() -> None:
     assert np.count_nonzero(displacement_mm) > 0
     np.testing.assert_allclose(simulated_mm[:, 1], original_mm[:, 1], atol=1e-12)
     lateral_motion = simulated_mm[:, 0] - original_mm[:, 0]
-    assert float(np.max(np.abs(lateral_motion))) <= 0.61
+    assert float(np.max(np.abs(lateral_motion))) <= 1.81
     assert np.all(original_mm[:, 0] * lateral_motion <= 1e-10)
     assert np.all(displacement_mm[original_mm[:, 1] >= 42.0] == 0.0)
     assert np.all(displacement_mm[np.abs(original_mm[:, 0]) >= roi["lateral_half_width_mm"]] == 0.0)
@@ -253,8 +253,10 @@ def test_hump_cross_section_remains_convex_and_blends_into_sidewalls() -> None:
         hump_level & (np.abs(source_mm[:, 0]) >= 6.0) & (np.abs(source_mm[:, 0]) <= 10.0)
     )
     assert float(np.min(displacement_mm[source_sidewall])) > 3.5
-    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] > 0.1
-    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] <= 0.6
+    assert roi["transverse_model"]["diagnostic_exaggeration_enabled"] is True
+    assert roi["transverse_model"]["diagnostic_exaggeration_factor"] == 3.0
+    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] > 1.0
+    assert roi["transverse_model"]["actual_maximum_medial_adjustment_mm"] <= 1.8
 
 
 def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
@@ -342,6 +344,10 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     )
     assert diagnostics["glb_export"]["geometry_differs_from_source"] is True
     assert diagnostics["glb_export"]["maximum_displacement_from_source_mm"] >= 3.8
+    assert diagnostics["glb_export"]["maximum_transverse_displacement_from_source_mm"] > 1.0
+    assert diagnostics["glb_export"]["vertices_with_transverse_change_over_0_1_mm"] > 0
+    assert diagnostics["glb_export"]["left_sidewall_median_medial_displacement_mm"] > 0.4
+    assert diagnostics["glb_export"]["right_sidewall_median_medial_displacement_mm"] > 0.4
     assert diagnostics["glb_export"]["normals_recomputed_from_simulated_geometry"] is True
     assert diagnostics["glb_export"]["maximum_normal_error_degrees"] < 6.0
     assert diagnostics["glb_export"]["p95_normal_error_degrees"] < 1.0
@@ -378,9 +384,18 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
         "supratip",
     }
     for name, section in cross_sections["sections"].items():
+        assert {
+            "width_before_mm",
+            "width_after_mm",
+            "left_sidewall_displacement_mm",
+            "right_sidewall_displacement_mm",
+        } <= set(section)
         assert len(section["source_lateral_mm"]) == 49
         assert len(section["simulated_lateral_mm"]) == 49
         if name in {"hump_region", "mid_dorsum"}:
+            assert section["width_before_mm"] - section["width_after_mm"] > 1.0
+            assert section["left_sidewall_displacement_mm"] > 0.5
+            assert section["right_sidewall_displacement_mm"] > 0.5
             width_ratio = (
                 section["simulated_width_at_1_5mm_depth_mm"]
                 / section["source_width_at_1_5mm_depth_mm"]
@@ -397,6 +412,11 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
         "affected_roi_render_png",
         "clay_before_png",
         "clay_after_png",
+        "profile_clay_before_png",
+        "profile_clay_after_png",
+        "top_down_before_png",
+        "top_down_after_png",
+        "moved_vertices_heatmap_png",
         "normal_before_png",
         "normal_after_png",
     ):
@@ -411,6 +431,8 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert np.count_nonzero(red_highlight) > 0
     viewer_glb = output / manifest["output_paths"]["viewer_glb"]
     assert viewer_glb.is_file()
+    assert manifest["exact_final_glb_path"] == str(viewer_glb.resolve())
+    assert manifest["output_paths"]["exact_final_glb"] == str(viewer_glb.resolve())
     assert manifest["output_file_sha256"]["viewer_glb"] == _sha256(viewer_glb)
 
 

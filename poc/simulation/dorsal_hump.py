@@ -22,6 +22,11 @@ REQUIRED_LANDMARKS = {
 }
 MIN_REDUCTION_MM = 0.0
 MAX_REDUCTION_MM = 5.0
+# The transverse component is deliberately exaggerated while it is being
+# validated in frontal views.  Keep this separate from the sagittal/profile
+# correction so changing it cannot alter the established hump curve.
+TRANSVERSE_DIAGNOSTIC_EXAGGERATION = 3.0
+MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM = 1.8
 
 
 def _unit(vector: np.ndarray, label: str) -> np.ndarray:
@@ -452,7 +457,11 @@ def _compute_dorsal_hump_deformation(
         0.0,
     )
     normalized_lateral_radius = np.clip(lateral_distance, 0.0, 1.0)
-    maximum_narrowing_mm = min(0.6, 0.1 * reduction_mm)
+    natural_narrowing_mm = min(0.6, 0.1 * reduction_mm)
+    maximum_narrowing_mm = min(
+        MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM,
+        TRANSVERSE_DIAGNOSTIC_EXAGGERATION * natural_narrowing_mm,
+    )
     transverse_narrowing_weight = np.sin(np.pi * normalized_lateral_radius) ** 2
     desired_lateral_shift_mm = (
         -np.sign(lateral)
@@ -613,6 +622,9 @@ def _compute_dorsal_hump_deformation(
     roi_metadata["transverse_model"] = {
         "cross_section_behavior": "measured source bridge translated as a connected 3D section",
         "central_crown_reserve_mm": round(crown_reserve_mm, 6),
+        "diagnostic_exaggeration_enabled": True,
+        "diagnostic_exaggeration_factor": TRANSVERSE_DIAGNOSTIC_EXAGGERATION,
+        "unexaggerated_maximum_medial_adjustment_mm": round(natural_narrowing_mm, 6),
         "requested_maximum_medial_adjustment_mm": round(maximum_narrowing_mm, 6),
         "actual_maximum_medial_adjustment_mm": round(float(np.max(np.abs(lateral_shift_mm))), 6),
         "sidewall_blending": "biharmonic falloff to fixed lateral and longitudinal boundaries",
@@ -800,6 +812,7 @@ def _cross_section_diagnostics(
     frame: dict[str, Any],
     apex_normalized: float,
     half_width_mm: float,
+    bridge_core_half_width_mm: float,
 ) -> dict[str, Any]:
     source_longitudinal, source_lateral, source_anterior = _coordinates(
         source_vertices_m * 1000.0, frame
@@ -838,17 +851,73 @@ def _cross_section_diagnostics(
         central = np.abs(simulated_x) <= min(4.5, 0.35 * half_width_mm)
         simulated_curvature = float(np.polyfit(simulated_x[central], simulated_y[central], 2)[0])
         source_curvature = float(np.polyfit(source_x[central], source_y[central], 2)[0])
+        source_envelope_width_mm = _section_width(source_x, source_y, 1.5)
+        simulated_envelope_width_mm = _section_width(simulated_x, simulated_y, 1.5)
+
+        # Measure the two actual sidewalls by vertex identity.  Reporting the
+        # sampled envelope width alone can hide a lateral deformation when a
+        # neighboring bin becomes the new 1.5 mm threshold crossing.
+        near_level = np.abs(source_longitudinal - level_mm) <= longitudinal_window_mm
+        source_level_anterior = source_anterior[near_level]
+        ridge_anterior_mm = (
+            float(np.percentile(source_level_anterior, 98.0))
+            if len(source_level_anterior)
+            else float("-inf")
+        )
+        surface_band = source_anterior >= ridge_anterior_mm - 5.0
+        matched_bridge = near_level & (source_anterior >= ridge_anterior_mm - 1.5)
+        width_before_mm = (
+            float(np.ptp(source_lateral[matched_bridge]))
+            if np.count_nonzero(matched_bridge) >= 2
+            else source_envelope_width_mm
+        )
+        width_after_mm = (
+            float(np.ptp(simulated_lateral[matched_bridge]))
+            if np.count_nonzero(matched_bridge) >= 2
+            else simulated_envelope_width_mm
+        )
+        sidewall_inner_mm = 0.4 * bridge_core_half_width_mm
+        sidewall_outer_mm = min(1.15 * bridge_core_half_width_mm, 0.8 * half_width_mm)
+        lateral_change_mm = simulated_lateral - source_lateral
+        left_sidewall = (
+            near_level
+            & surface_band
+            & (source_lateral <= -sidewall_inner_mm)
+            & (source_lateral >= -sidewall_outer_mm)
+        )
+        right_sidewall = (
+            near_level
+            & surface_band
+            & (source_lateral >= sidewall_inner_mm)
+            & (source_lateral <= sidewall_outer_mm)
+        )
+        left_medial_mm = np.maximum(lateral_change_mm[left_sidewall], 0.0)
+        right_medial_mm = np.maximum(-lateral_change_mm[right_sidewall], 0.0)
+        left_sidewall_displacement_mm = (
+            float(np.median(left_medial_mm[left_medial_mm > 1e-6]))
+            if np.any(left_medial_mm > 1e-6)
+            else 0.0
+        )
+        right_sidewall_displacement_mm = (
+            float(np.median(right_medial_mm[right_medial_mm > 1e-6]))
+            if np.any(right_medial_mm > 1e-6)
+            else 0.0
+        )
         sections[name] = {
             "normalized_nasion_to_supratip": round(float(normalized), 6),
             "longitudinal_mm_from_nasion": round(level_mm, 6),
+            "width_before_mm": round(width_before_mm, 6),
+            "width_after_mm": round(width_after_mm, 6),
+            "left_sidewall_displacement_mm": round(left_sidewall_displacement_mm, 6),
+            "right_sidewall_displacement_mm": round(right_sidewall_displacement_mm, 6),
+            "left_sidewall_sample_count": int(np.count_nonzero(left_sidewall)),
+            "right_sidewall_sample_count": int(np.count_nonzero(right_sidewall)),
             "source_lateral_mm": source_x.round(6).tolist(),
             "source_anterior_mm": source_y.round(6).tolist(),
             "simulated_lateral_mm": simulated_x.round(6).tolist(),
             "simulated_anterior_mm": simulated_y.round(6).tolist(),
-            "source_width_at_1_5mm_depth_mm": round(_section_width(source_x, source_y, 1.5), 6),
-            "simulated_width_at_1_5mm_depth_mm": round(
-                _section_width(simulated_x, simulated_y, 1.5), 6
-            ),
+            "source_width_at_1_5mm_depth_mm": round(source_envelope_width_mm, 6),
+            "simulated_width_at_1_5mm_depth_mm": round(simulated_envelope_width_mm, 6),
             "source_ridge_lateral_mm": round(float(source_x[np.argmax(source_y)]), 6),
             "simulated_ridge_lateral_mm": round(float(simulated_x[np.argmax(simulated_y)]), 6),
             "source_central_quadratic_curvature_per_mm": round(source_curvature, 8),
@@ -856,7 +925,16 @@ def _cross_section_diagnostics(
         }
     return {
         "definition": "frontal transverse anterior envelope",
-        "width_definition": "lateral span within 1.5 mm posterior to the dorsal ridge",
+        "width_definition": (
+            "lateral span of source-identical bridge vertices selected within 1.5 mm posterior "
+            "to the source dorsal ridge"
+        ),
+        "envelope_width_definition": (
+            "independent source/simulation lateral envelope within 1.5 mm of each dorsal ridge"
+        ),
+        "sidewall_displacement_definition": (
+            "median medial displacement of source-identical dorsal sidewall vertices"
+        ),
         "longitudinal_sampling_half_window_mm": round(longitudinal_window_mm, 6),
         "sections": sections,
     }
@@ -1101,7 +1179,7 @@ def _write_diagnostic_renders(
     simulated_vertices_m: np.ndarray,
     faces: np.ndarray,
     frame: dict[str, Any],
-    affected_vertex_mask: np.ndarray,
+    displacement_mm: np.ndarray,
 ) -> dict[str, Path]:
     import cv2
 
@@ -1115,6 +1193,8 @@ def _write_diagnostic_renders(
     )
     source_normals = _vertex_normals(source_vertices_m, faces)
     simulated_normals = _vertex_normals(simulated_vertices_m, faces)
+    displacement_mm = np.asarray(displacement_mm, dtype=np.float64)
+    affected_vertex_mask = displacement_mm > 0.1
     anterior_axis = np.asarray(frame["anterior"])
     if float(np.median(source_normals @ anterior_axis)) < 0.0:
         source_normals *= -1.0
@@ -1201,6 +1281,49 @@ def _write_diagnostic_renders(
         point_colors_bgr=clay_colors(simulated_normals),
         bounds=front_bounds,
     )
+    profile_clay_before, _ = _projection_image(
+        source_longitudinal,
+        source_anterior,
+        -np.abs(source_lateral),
+        title="Clay profile view - source",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        point_colors_bgr=clay_colors(source_normals),
+        bounds=profile_bounds,
+    )
+    profile_clay_after, _ = _projection_image(
+        simulated_longitudinal,
+        simulated_anterior,
+        -np.abs(simulated_lateral),
+        title="Clay profile view - simulated",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        point_colors_bgr=clay_colors(simulated_normals),
+        bounds=profile_bounds,
+    )
+    top_down_before, top_down_bounds = _projection_image(
+        source_lateral,
+        source_anterior,
+        -source_longitudinal,
+        title="Clay top-down view - source",
+        horizontal_label="patient left to right",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        point_colors_bgr=clay_colors(source_normals),
+    )
+    top_down_after, _ = _projection_image(
+        simulated_lateral,
+        simulated_anterior,
+        -simulated_longitudinal,
+        title="Clay top-down view - simulated",
+        horizontal_label="patient left to right",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        point_colors_bgr=clay_colors(simulated_normals),
+        bounds=top_down_bounds,
+    )
     normal_before, _ = _projection_image(
         source_lateral,
         source_longitudinal,
@@ -1246,6 +1369,33 @@ def _write_diagnostic_renders(
         bounds=profile_bounds,
     )
     roi_highlight = np.concatenate([highlighted_front, highlighted_profile], axis=1)
+    heat_scale = max(float(np.max(displacement_mm)), 1e-9)
+    heat_values = np.rint(255.0 * np.clip(displacement_mm / heat_scale, 0.0, 1.0)).astype(np.uint8)
+    heat_colors = cv2.applyColorMap(heat_values[:, None], cv2.COLORMAP_TURBO).reshape(-1, 3)
+    heat_colors[displacement_mm <= 0.1] = (220, 220, 220)
+    heatmap_front, _ = _projection_image(
+        simulated_lateral,
+        simulated_longitudinal,
+        simulated_anterior,
+        title=f"Moved vertices - front (max {heat_scale:.2f} mm)",
+        horizontal_label="patient left to right",
+        vertical_label="superior to inferior",
+        vertical_increases_down=True,
+        point_colors_bgr=heat_colors,
+        bounds=front_bounds,
+    )
+    heatmap_profile, _ = _projection_image(
+        simulated_longitudinal,
+        simulated_anterior,
+        -np.abs(simulated_lateral),
+        title=f"Moved vertices - profile (max {heat_scale:.2f} mm)",
+        horizontal_label="nasion to inferior",
+        vertical_label="posterior to anterior",
+        vertical_increases_down=False,
+        point_colors_bgr=heat_colors,
+        bounds=profile_bounds,
+    )
+    moved_vertices_heatmap = np.concatenate([heatmap_front, heatmap_profile], axis=1)
     paths = {
         "front_before_png": output_dir / f"reduction_{label}mm_front_before.png",
         "front_after_png": output_dir / f"reduction_{label}mm_front_after.png",
@@ -1254,6 +1404,13 @@ def _write_diagnostic_renders(
         "affected_roi_render_png": output_dir / f"reduction_{label}mm_affected_roi.png",
         "clay_before_png": output_dir / f"reduction_{label}mm_clay_before.png",
         "clay_after_png": output_dir / f"reduction_{label}mm_clay_after.png",
+        "profile_clay_before_png": output_dir / f"reduction_{label}mm_profile_clay_before.png",
+        "profile_clay_after_png": output_dir / f"reduction_{label}mm_profile_clay_after.png",
+        "top_down_before_png": output_dir / f"reduction_{label}mm_top_down_before.png",
+        "top_down_after_png": output_dir / f"reduction_{label}mm_top_down_after.png",
+        "moved_vertices_heatmap_png": (
+            output_dir / f"reduction_{label}mm_moved_vertices_heatmap.png"
+        ),
         "normal_before_png": output_dir / f"reduction_{label}mm_normals_before.png",
         "normal_after_png": output_dir / f"reduction_{label}mm_normals_after.png",
     }
@@ -1265,6 +1422,11 @@ def _write_diagnostic_renders(
         "affected_roi_render_png": roi_highlight,
         "clay_before_png": clay_before,
         "clay_after_png": clay_after,
+        "profile_clay_before_png": profile_clay_before,
+        "profile_clay_after_png": profile_clay_after,
+        "top_down_before_png": top_down_before,
+        "top_down_after_png": top_down_after,
+        "moved_vertices_heatmap_png": moved_vertices_heatmap,
         "normal_before_png": normal_before,
         "normal_after_png": normal_after,
     }
@@ -1282,7 +1444,9 @@ def _export_simulation_glb(
     faces: np.ndarray,
     source_vertex_colors: np.ndarray | None,
     metadata: dict[str, Any],
-) -> dict[str, float | bool]:
+    frame: dict[str, Any],
+    bridge_core_half_width_mm: float,
+) -> dict[str, Any]:
     import trimesh
 
     simulated_normals = _vertex_normals(simulated_vertices_m, faces)
@@ -1370,13 +1534,31 @@ def _export_simulation_glb(
         raise RuntimeError(
             f"Simulation GLB moved the requested surface by {maximum_corner_error:.3g} m"
         )
-    glb_displacement_mm = (
-        np.linalg.norm(
-            np.asarray(persisted.vertices)[persisted_faces] - source_vertices_m[faces],
-            axis=2,
-        )
-        * 1000.0
+    persisted_corner_vertices_m = np.asarray(persisted.vertices)[persisted_faces]
+    source_corner_vertices_m = source_vertices_m[faces]
+    glb_corner_delta_mm = (persisted_corner_vertices_m - source_corner_vertices_m) * 1000.0
+    glb_displacement_mm = np.linalg.norm(glb_corner_delta_mm, axis=2)
+    transverse_corner_change_mm = glb_corner_delta_mm @ np.asarray(frame["lateral"])
+    canonical_transverse_change_mm = np.zeros(len(source_vertices_m), dtype=np.float64)
+    canonical_transverse_change_mm[faces.reshape(-1)] = transverse_corner_change_mm.reshape(-1)
+    source_longitudinal, source_lateral, _ = _coordinates(source_vertices_m * 1000.0, frame)
+    sidewall_inner_mm = 0.4 * bridge_core_half_width_mm
+    sidewall_outer_mm = 1.15 * bridge_core_half_width_mm
+    dorsal_span = (source_longitudinal > float(frame["roi_start_mm"])) & (
+        source_longitudinal < float(frame["roi_end_mm"])
     )
+    left_sidewall = (
+        dorsal_span
+        & (source_lateral <= -sidewall_inner_mm)
+        & (source_lateral >= -sidewall_outer_mm)
+    )
+    right_sidewall = (
+        dorsal_span & (source_lateral >= sidewall_inner_mm) & (source_lateral <= sidewall_outer_mm)
+    )
+    left_medial = canonical_transverse_change_mm[left_sidewall]
+    right_medial = -canonical_transverse_change_mm[right_sidewall]
+    left_medial = left_medial[left_medial > 0.1]
+    right_medial = right_medial[right_medial > 0.1]
     persisted_normals = np.asarray(persisted.vertex_normals, dtype=np.float64)
     expected_corner_normals = simulated_normals[faces]
     persisted_corner_normals = persisted_normals[persisted_faces]
@@ -1386,6 +1568,18 @@ def _export_simulation_glb(
     return {
         "maximum_vertex_error_from_ply_mm": maximum_corner_error * 1000.0,
         "maximum_displacement_from_source_mm": float(np.max(glb_displacement_mm)),
+        "maximum_transverse_displacement_from_source_mm": float(
+            np.max(np.abs(canonical_transverse_change_mm))
+        ),
+        "vertices_with_transverse_change_over_0_1_mm": int(
+            np.count_nonzero(np.abs(canonical_transverse_change_mm) > 0.1)
+        ),
+        "left_sidewall_median_medial_displacement_mm": (
+            float(np.median(left_medial)) if len(left_medial) else 0.0
+        ),
+        "right_sidewall_median_medial_displacement_mm": (
+            float(np.median(right_medial)) if len(right_medial) else 0.0
+        ),
         "geometry_differs_from_source": bool(np.max(glb_displacement_mm) > 1e-5),
         "normals_recomputed_from_simulated_geometry": True,
         "maximum_normal_error_degrees": maximum_normal_error_degrees,
@@ -1532,6 +1726,7 @@ def simulate_dorsal_hump_reduction(
         frame,
         float(roi_metadata["detected_hump_apex"]["normalized_nasion_to_supratip"]),
         float(roi_metadata["lateral_half_width_mm"]),
+        float(roi_metadata["transverse_bridge_core_half_width_mm"]),
     )
     _write_cross_section_svg(output_cross_sections_svg, cross_section_diagnostic)
     output_cross_sections_json.write_text(
@@ -1559,7 +1754,7 @@ def simulate_dorsal_hump_reduction(
         persisted_vertices_m,
         faces,
         frame,
-        persisted_displacement_mm > 0.1,
+        persisted_displacement_mm,
     )
 
     if float(reduction_mm) == 0.0:
@@ -1597,6 +1792,7 @@ def simulate_dorsal_hump_reduction(
         ),
         "source_geometry_id": geometry["geometry_id"],
         "simulation_geometry_id": simulation_identity["geometry_id"],
+        "exact_final_glb_path": str(viewer_glb.resolve()),
         "source_geometry_unchanged": True,
         "requested_reduction_mm": float(reduction_mm),
         "maximum_actual_vertex_displacement_mm": round(maximum_displacement_mm, 6),
@@ -1654,6 +1850,7 @@ def simulate_dorsal_hump_reduction(
             "ply": output_ply.name,
             "glb": output_glb.name,
             "viewer_glb": viewer_glb.name,
+            "exact_final_glb": str(viewer_glb.resolve()),
             "affected_roi_ply": output_roi_ply.name,
             "moved_vertices_ply": (
                 output_moved_vertices_ply.name if moved_vertex_export_count else None
@@ -1676,9 +1873,21 @@ def simulate_dorsal_hump_reduction(
         faces,
         vertex_colors,
         manifest,
+        frame,
+        float(roi_metadata["transverse_bridge_core_half_width_mm"]),
     )
     if float(reduction_mm) > 0.0 and not glb_diagnostics["geometry_differs_from_source"]:
         raise RuntimeError("The exported GLB contains the original rather than simulated geometry")
+    if float(reduction_mm) > 0.0:
+        minimum_transverse_change_mm = 0.15 * float(reduction_mm)
+        if (
+            glb_diagnostics["maximum_transverse_displacement_from_source_mm"]
+            < minimum_transverse_change_mm
+            or glb_diagnostics["vertices_with_transverse_change_over_0_1_mm"] == 0
+        ):
+            raise RuntimeError(
+                "The exported GLB does not contain a meaningful transverse bridge change"
+            )
     manifest["diagnostics"]["glb_export"] = glb_diagnostics
     shutil.copy2(output_glb, viewer_glb)
     source_hashes_after = {str(path.resolve()): _sha256_file(path) for path in source_paths}
@@ -1721,5 +1930,11 @@ def simulate_dorsal_hump_reduction(
         apex["longitudinal_mm_from_nasion"],
         apex["normalized_nasion_to_supratip"],
         apex["outward_convexity_mm"],
+    )
+    get_logger().info(
+        "Transverse GLB verification | max %.3f mm | >0.1 mm %d vertices | final %s",
+        manifest["diagnostics"]["glb_export"]["maximum_transverse_displacement_from_source_mm"],
+        manifest["diagnostics"]["glb_export"]["vertices_with_transverse_change_over_0_1_mm"],
+        manifest["exact_final_glb_path"],
     )
     return manifest
