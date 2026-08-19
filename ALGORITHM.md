@@ -532,20 +532,21 @@ pronasale component orthogonal to that axis defines anterior projection, and the
 aligned with the observed left-to-right alar direction. No facial symmetry is imposed.
 
 Within a narrow midline strip from nasion to an inferred supratip boundary, the existing dorsal
-profile is the smoothed 90th-percentile anterior envelope. A straight sagittal target joins robust
-median anchors in the proximal and distal profile bands. This prevents a broad hump from being
-absorbed into a flexible target fit. Positive convex excess above that target is the removable hump;
-non-convex profile regions receive no displacement. The apex is the maximum raw outward excess in
-the upper/mid-dorsal search band (normalized 0.08–0.62 from nasion to supratip), so a secondary
-lower-dorsum or supratip deviation cannot become the reduction center. The applied peak is the lesser
-of the requested slider value and detected convexity. Every upper/mid profile sample receives that
-same fractional convexity reduction through the apex, followed by an adaptive C2 fade through the mid
-dorsum. An additional C2 ceiling leaves ordinary targets unchanged but bounds any excessive distal
-target: it begins at normalized position 0.62, permits at most 35% of the applied peak at the protected
-lower-dorsum boundary 0.70, and reaches zero at 0.82. This remains safe even when a separate lower
-convexity is larger than the selected upper/mid hump. The result never crosses the no-scoop reference
-curve. The reported available hump height is algorithmic rather than an anatomical or clinical
-measurement.
+profile is the smoothed 90th-percentile anterior envelope. A straight chord through robust proximal
+and distal anchors is used only to locate the maximum outward residual in the upper/mid-dorsal search
+band (normalized 0.16–0.62). It is not the target profile and it never caps the requested operation.
+
+`reduction_mm` is the desired posterior displacement amplitude at that detected hump apex. For every
+accepted 0.0–5.0 mm request, the current solver applies the requested amplitude exactly; consequently
+`applied_reduction_mm == requested_reduction_mm` and `cap_reason` is null. Any future anatomical cap
+must change those fields explicitly rather than silently returning a smaller operation.
+
+The sagittal target is the source profile minus a broad asymmetric Gaussian displacement kernel. Its
+maximum is exactly `reduction_mm` at the hump apex. The upper side uses normalized sigma 0.34 and the
+lower side 0.16. A C2 radix fade ends at 0.16, while a C2 distal fade begins at 0.64 and reaches zero
+at the supratip anchor 0.88. This produces one smooth, continuous target that moves the upper and mid
+dorsum coherently and returns to anchored anatomy without reference-line clipping, local steps, or
+pointwise target truncation.
 
 For each vertex of the connected dorsal vault, the simulator interpolates `delta(s)` and multiplies
 it by a smooth transverse vault weight. The ridge receives full correction, adjacent slopes retain
@@ -554,7 +555,9 @@ A mild medial component peaks on the slopes/sidewalls and is capped at 0.6 mm. B
 medial components are constraints in one vector-valued biharmonic solve; there is no center-strip
 permission mask or second independent sidewall pass. The fixed perimeter includes the nasion,
 supratip, cheeks, tip, alae, nostrils, columella, and upper lip. The solve never uses vertex normals
-or imposes left/right symmetry. A 0.0 mm request copies the authoritative PLY exactly.
+or imposes left/right symmetry. One unconstrained interior transition ring lets the biharmonic field
+blend into the fixed perimeter without an abrupt mesh seam. A 0.0 mm request copies the authoritative
+PLY exactly.
 
 Outputs live under `simulations/dorsal_hump/`. `simulation.json` records the source geometry ID,
 simulation geometry ID, requested reduction, maximum persisted displacement, affected vertex
@@ -568,6 +571,8 @@ comparisons, normal visualization, separate front/profile displacement heatmaps,
 sidewall coverage ratios are also persisted. The
 notebook downloads a geometry-hash-qualified GLB so external viewers cannot reuse a stale file with
 the same slider label. This is a visual aesthetic simulation, not a surgical-outcome prediction.
+The manifest and profile JSON record requested/applied reduction, cap reason, apex/upper/mid/lower/
+radix/supratip displacement, maximum vertex displacement, and moved-vertex count.
 GLB transverse verification compares the exported maximum directly with the solved medial field to
 within a 0.002 mm persistence tolerance; it does not require a fixed 0.1 mm movement when the applied
 profile correction intentionally produces a smaller transverse request.

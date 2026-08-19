@@ -123,7 +123,9 @@ The deformation uses one vector-valued biharmonic solve over the connected 3D do
 vault perimeter is fixed. The simulation directory contains original/target/final profile curves,
 transverse sections at the upper dorsum, hump, mid dorsum, and supratip, separate front/profile
 displacement heatmaps, clay and normal comparisons, and numerical ridge/slope/sidewall coverage
-checks. If the request exceeds detected convexity, correction stops at the no-scoop reference.
+checks. `reduction_mm` is the requested posterior displacement amplitude at the detected hump apex;
+the chord-relative convexity is used only to locate that apex and does not silently reduce the
+request. The manifest reports `requested_reduction_mm`, `applied_reduction_mm`, and `cap_reason`.
 
 Use `--resume` only with unchanged inputs and parameters. `case.json` stores the capture
 fingerprint, software version, stage parameters, upstream signatures, status, and timing. A stale

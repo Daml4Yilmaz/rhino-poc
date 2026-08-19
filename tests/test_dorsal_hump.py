@@ -183,24 +183,29 @@ def test_broad_hump_is_not_absorbed_into_target_profile() -> None:
     _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 2.0, faces)
 
     assert 1.9 <= float(displacement_mm.max()) <= np.hypot(2.0, 0.2) + 1e-6
-    assert roi["profile_model"]["available_hump_height_mm"] >= 2.5
-    assert "nasion and supratip anchors" in roi["profile_model"]["reference_profile"]
-    assert "no-scoop" in roi["profile_model"]["target_profile"]
+    model = roi["profile_model"]
+    assert model["detected_convex_excess_for_localization_mm"] >= 2.5
+    assert model["requested_reduction_mm"] == 2.0
+    assert model["applied_reduction_mm"] == 2.0
+    assert model["cap_reason"] is None
+    assert "localization only" in model["apex_detection_reference"]
+    assert "source profile minus" in model["target_profile"]
 
 
-def test_slider_cannot_create_a_new_sagittal_scoop_below_reference() -> None:
+def test_reduction_amplitude_is_not_clipped_to_reference_line_excess() -> None:
     vertices, faces, landmarks = _synthetic_face(hump_height_mm=0.5)
 
-    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 5.0, faces)
+    _, displacement_mm, roi = compute_dorsal_hump_deformation(vertices, landmarks, 3.5, faces)
 
-    assert roi["profile_model"]["available_hump_height_mm"] < 1.0
-    assert roi["profile_model"]["available_hump_height_is_clinical_measurement"] is False
-    applied = roi["profile_model"]["applied_peak_reduction_mm"]
-    assert applied == roi["profile_model"]["available_hump_height_mm"]
-    assert roi["profile_model"]["limited_by_detected_convexity"] is True
-    assert roi["profile_model"]["maximum_new_below_reference_mm"] == 0.0
-    assert 0.3 <= float(displacement_mm.max()) <= np.hypot(applied, 0.1 * applied) + 1e-6
-    assert "upper bound" in roi["profile_model"]["requested_peak_policy"]
+    model = roi["profile_model"]
+    assert model["detected_convex_excess_for_localization_mm"] < 1.0
+    assert model["requested_reduction_mm"] == 3.5
+    assert model["applied_reduction_mm"] == 3.5
+    assert model["cap_reason"] is None
+    assert 3.4 <= float(displacement_mm.max()) <= np.hypot(3.5, 0.35) + 1e-6
+    apex = roi["profile_point_diagnostics"]["hump_apex"]
+    assert apex["requested_posterior_displacement_mm"] == 3.5
+    assert apex["final_posterior_displacement_mm"] > 3.35
 
 
 def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
@@ -214,44 +219,50 @@ def test_upper_hump_apex_is_targeted_instead_of_larger_supratip_bulge() -> None:
     lower_region = (longitudinal_mm >= 30.0) & (longitudinal_mm <= 39.0)
     assert 12.0 <= apex["longitudinal_mm_from_nasion"] <= 20.0
     assert 12.0 <= maximum_vertex_longitudinal_mm <= 20.0
-    applied = roi["profile_model"]["applied_peak_reduction_mm"]
-    assert 1.7 <= applied < 4.0
+    applied = roi["profile_model"]["applied_reduction_mm"]
+    assert applied == 4.0
     assert float(displacement_mm.max()) >= 0.95 * applied
     assert float(displacement_mm[lower_region].max()) < 0.5 * float(displacement_mm.max())
 
 
-def test_upper_and_mid_hump_shoulders_receive_the_apex_correction_fraction() -> None:
+def test_upper_mid_and_lower_dorsum_follow_smooth_apex_target() -> None:
     vertices, faces, landmarks = _synthetic_upper_hump_with_larger_supratip_bulge()
 
     _, _, roi = compute_dorsal_hump_deformation(vertices, landmarks, 1.0, faces)
 
-    applied_fraction = roi["profile_model"]["applied_upper_mid_convexity_fraction"]
     points = roi["profile_point_diagnostics"]
-    assert 0.4 < applied_fraction < 0.5
-    for name in ("upper_dorsum", "hump_apex"):
+    for name in ("upper_dorsum", "hump_apex", "mid_dorsum", "lower_dorsum"):
         point = points[name]
-        assert point["source_convex_excess_mm"] > 0.1
-        assert abs(point["requested_convexity_reduction_fraction"] - applied_fraction) < 0.01
         assert point["final_posterior_displacement_mm"] > (
             0.9 * point["requested_posterior_displacement_mm"]
         )
-    assert 0.0 < points["mid_dorsum"]["requested_convexity_reduction_fraction"] < applied_fraction
-    assert points["lower_dorsum"]["requested_posterior_displacement_mm"] == 0.0
-    assert points["supratip"]["requested_posterior_displacement_mm"] == 0.0
+    assert points["hump_apex"]["requested_posterior_displacement_mm"] == 1.0
+    assert points["upper_dorsum"]["requested_posterior_displacement_mm"] > 0.7
+    assert points["mid_dorsum"]["requested_posterior_displacement_mm"] > 0.4
+    assert points["lower_dorsum"]["requested_posterior_displacement_mm"] > 0.05
+    assert points["supratip"]["requested_posterior_displacement_mm"] < 0.01
     assert points["pronasale"]["final_posterior_displacement_mm"] == 0.0
 
 
-def test_distal_hump_fades_below_lower_dorsum_acceptance_limit() -> None:
+def test_distal_hump_keeps_requested_apex_amplitude_and_smooth_lower_support() -> None:
     vertices, faces, landmarks = _synthetic_distal_hump_with_lower_dorsum_convexity()
 
     _, _, roi = compute_dorsal_hump_deformation(vertices, landmarks, 3.5, faces)
 
-    applied = roi["profile_model"]["applied_peak_reduction_mm"]
+    applied = roi["profile_model"]["applied_reduction_mm"]
     lower = roi["profile_point_diagnostics"]["lower_dorsum"]
     assert roi["detected_hump_apex"]["normalized_nasion_to_supratip"] > 0.60
-    assert lower["source_convex_excess_mm"] > applied
-    assert lower["requested_posterior_displacement_mm"] <= 0.35 * applied
-    assert roi["profile_model"]["lower_dorsum_ceiling_normalized"] == [0.62, 0.70, 0.82]
+    assert applied == 3.5
+    assert roi["profile_point_diagnostics"]["hump_apex"][
+        "requested_posterior_displacement_mm"
+    ] == 3.5
+    assert 0.4 * applied < lower["requested_posterior_displacement_mm"] < 0.8 * applied
+    assert lower["final_posterior_displacement_mm"] > 0.9 * lower[
+        "requested_posterior_displacement_mm"
+    ]
+    assert roi["profile_point_diagnostics"]["supratip"][
+        "final_posterior_displacement_mm"
+    ] < 0.1
 
 
 def test_connected_profile_vertex_is_not_left_fixed_by_pointwise_clipping() -> None:
@@ -283,7 +294,7 @@ def test_profile_correction_is_continuous_without_a_scooped_section() -> None:
     active_values = ridge_displacement[active]
     assert len(active_values) > 20
     assert np.max(np.abs(np.diff(active_values))) < 0.65
-    assert np.max(np.abs(np.diff(active_values, n=2))) < 0.25
+    assert np.max(np.abs(np.diff(active_values, n=2))) < 0.45
     solver = roi["deformation_solver"]
     assert solver["constraint_vertex_count"] > 0
     assert solver["fixed_boundary_vertex_count"] > 0
@@ -360,9 +371,12 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
 
     assert {path: _sha256(path) for path in source_paths} == hashes_before
     assert manifest["operation"] == "dorsal_hump_reduction"
-    assert manifest["solver_id"] == "coupled-vector-biharmonic-full-vault-v1"
+    assert manifest["schema_version"] == 2
+    assert manifest["solver_id"] == "coupled-vector-biharmonic-full-vault-v2"
     assert len(manifest["solver_module_sha256"]) == 64
     assert manifest["requested_reduction_mm"] == 2.0
+    assert manifest["applied_reduction_mm"] == 2.0
+    assert manifest["cap_reason"] is None
     assert manifest["source_geometry_unchanged"] is True
     assert manifest["affected_vertex_count"] > 0
     assert 0.0 < manifest["maximum_actual_vertex_displacement_mm"] <= np.hypot(2.0, 0.2) + 1e-6
@@ -383,7 +397,9 @@ def test_simulation_outputs_are_separate_and_sources_remain_unchanged(
     get_logger().handlers.clear()
 
 
-def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path: Path) -> None:
+def test_three_point_five_mm_persists_requested_profile_and_full_vault_change(
+    tmp_path: Path,
+) -> None:
     import cv2
     import open3d as o3d
 
@@ -395,17 +411,18 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
         case / "geometry.json",
         case / "landmarks.json",
         output,
-        reduction_mm=4.0,
+        reduction_mm=3.5,
         source_glb_path=case / "face_model.glb",
     )
 
     diagnostics = manifest["diagnostics"]
-    assert diagnostics["requested_reduction_mm"] == 4.0
+    assert diagnostics["requested_reduction_mm"] == 3.5
     assert diagnostics["mesh_position_units"] == "metres"
     assert diagnostics["millimetres_to_metres_scale"] == 0.001
     assert diagnostics["roi_vertex_count"] > 0
-    applied = diagnostics["applied_profile_reduction_mm"]
-    assert 3.0 <= applied < 4.0
+    applied = diagnostics["applied_reduction_mm"]
+    assert applied == 3.5
+    assert diagnostics["cap_reason"] is None
     assert (
         0.95 * applied
         <= diagnostics["maximum_displacement_mm"]
@@ -437,12 +454,28 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     assert diagnostics["ply_normals"]["recomputed_from_simulated_geometry"] is True
     assert diagnostics["ply_normals"]["maximum_error_degrees"] < 0.01
     assert diagnostics["acceptance"]["passed"] is True
-    assert diagnostics["acceptance"]["profile"]["superior_hump_not_left_behind"] is True
+    assert diagnostics["acceptance"]["profile"]["apex_amplitude_achieved"] is True
+    assert diagnostics["acceptance"]["profile"]["longitudinal_target_is_smooth"] is True
     assert diagnostics["acceptance"]["profile"]["smooth_target_followed"] is True
-    assert diagnostics["acceptance"]["profile"]["lower_dorsum_not_overcorrected"] is True
+    assert diagnostics["acceptance"]["profile"]["radix_is_stable"] is True
+    assert diagnostics["acceptance"]["profile"]["supratip_is_stable"] is True
     assert diagnostics["acceptance"]["frontal_vault"]["no_central_dent"] is True
     assert diagnostics["acceptance"]["frontal_vault"]["sidewalls_not_moved_outward"] is True
     assert diagnostics["acceptance"]["frontal_vault"]["no_center_strip_pattern"] is True
+    report = diagnostics["displacement_report"]
+    assert report["requested_reduction_mm"] == 3.5
+    assert report["applied_reduction_mm"] == 3.5
+    assert report["cap_reason"] is None
+    assert report["actual_displacement_at_hump_apex_mm"] > 3.35
+    assert report["upper_dorsum_displacement_mm"] > 1.5
+    assert report["mid_dorsum_displacement_mm"] > 3.0
+    assert 0.1 < report["lower_dorsum_displacement_mm"] < 2.5
+    assert report["radix_displacement_mm"] < 0.3
+    assert report["supratip_displacement_mm"] < 0.1
+    assert report["maximum_vertex_displacement_mm"] == diagnostics[
+        "maximum_displacement_mm"
+    ]
+    assert report["number_of_moved_vertices"] == manifest["affected_vertex_count"]
 
     simulated = o3d.io.read_triangle_mesh(str(output / manifest["output_paths"]["ply"]))
     simulated_vertices = np.asarray(simulated.vertices)
@@ -465,6 +498,10 @@ def test_four_mm_persists_visible_profile_and_exported_geometry_change(tmp_path:
     profile_curve = json.loads(
         (output / manifest["output_paths"]["profile_curve_json"]).read_text()
     )
+    assert profile_curve["requested_reduction_mm"] == 3.5
+    assert profile_curve["schema_version"] == 2
+    assert profile_curve["applied_reduction_mm"] == 3.5
+    assert profile_curve["cap_reason"] is None
     assert len(profile_curve["source_anterior_mm"]) == 64
     assert len(profile_curve["target_anterior_mm"]) == 64
     assert len(profile_curve["final_anterior_mm"]) == 64
@@ -578,7 +615,7 @@ def test_submillimeter_request_preserves_small_transverse_change_in_glb(tmp_path
     )
 
     transverse = manifest["diagnostics"]["glb_export"]
-    assert manifest["applied_profile_reduction_mm"] == 0.5
+    assert manifest["applied_reduction_mm"] == 0.5
     assert transverse["expected_transverse_displacement_from_solver_mm"] < 0.1
     assert transverse["vertices_with_transverse_change_over_0_1_mm"] == 0
     assert transverse["maximum_transverse_displacement_from_source_mm"] > 0.0

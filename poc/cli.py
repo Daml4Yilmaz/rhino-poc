@@ -234,7 +234,10 @@ def simulate_dorsal_hump(
             "--reduction-mm",
             min=0.0,
             max=5.0,
-            help="Requested dorsal hump reduction from 0.0 to 5.0 millimetres.",
+            help=(
+                "Requested posterior displacement amplitude at the detected hump apex, "
+                "from 0.0 to 5.0 millimetres."
+            ),
         ),
     ] = 0.0,
     output_dir: Annotated[

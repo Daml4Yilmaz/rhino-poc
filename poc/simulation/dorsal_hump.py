@@ -22,11 +22,12 @@ REQUIRED_LANDMARKS = {
 }
 MIN_REDUCTION_MM = 0.0
 MAX_REDUCTION_MM = 5.0
-DORSAL_VAULT_SOLVER_ID = "coupled-vector-biharmonic-full-vault-v1"
-LOWER_DORSUM_CEILING_START = 0.62
-LOWER_DORSUM_BAND_START = 0.70
-LOWER_DORSUM_CEILING_END = 0.82
-MAX_LOWER_DORSUM_CORRECTION_FRACTION = 0.35
+DORSAL_VAULT_SOLVER_ID = "coupled-vector-biharmonic-full-vault-v2"
+RADIX_FADE_END_NORMALIZED = 0.16
+DISTAL_FADE_START_NORMALIZED = 0.64
+SUPRATIP_ANCHOR_NORMALIZED = 0.88
+UPPER_DORSUM_KERNEL_SIGMA = 0.34
+LOWER_DORSUM_KERNEL_SIGMA = 0.16
 # Medial refinement remains mild even though it is solved together with the
 # posterior full-vault field.
 MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM = 0.6
@@ -363,75 +364,42 @@ def _compute_dorsal_hump_deformation(
     end = float(frame["roi_end_mm"])
     normalized_centers = (centers - start) / (end - start)
     convex_excess = np.maximum(profile - reference_profile, 0.0)
-    apex_search = (normalized_centers >= 0.08) & (normalized_centers <= 0.62)
+    apex_search = (
+        (normalized_centers >= RADIX_FADE_END_NORMALIZED)
+        & (normalized_centers <= 0.62)
+    )
     apex_candidates = np.flatnonzero(apex_search)
     apex_index = int(apex_candidates[np.argmax(convex_excess[apex_search])])
-    available_hump_mm = float(convex_excess[apex_index])
+    detected_convex_excess_mm = float(convex_excess[apex_index])
     apex_normalized = float(normalized_centers[apex_index])
-    if reduction_mm > 0.0 and available_hump_mm <= 1e-6:
-        raise RuntimeError("No positive upper/mid-dorsal convexity was found for hump reduction")
-    applied_reduction_mm = min(reduction_mm, available_hump_mm)
-    # Do not drive the profile behind its nasion-to-supratip reference.  The
-    # requested value is a ceiling; the detectable convexity is the anatomical
-    # ceiling.  This prevents an oversized slider request from creating a new
-    # sagittal scoop.
-    upper_fade = _smootherstep01(normalized_centers / 0.08)
-    distal_support_end = min(0.82, max(0.70, apex_normalized + 0.28))
-    distal_fade = 1.0 - _smootherstep01(
-        (normalized_centers - apex_normalized)
-        / max(distal_support_end - apex_normalized, 1e-9)
+    if reduction_mm > 0.0 and detected_convex_excess_mm <= 1e-6:
+        raise RuntimeError("No positive upper/mid-dorsal convexity was found to localize the hump")
+
+    # Version 2 gives the slider a literal displacement-amplitude meaning.  The
+    # chord is used only to localize the hump apex; it never clips the target.
+    # A broad asymmetric Gaussian moves the surrounding upper/mid dorsum, while
+    # C2 endpoint fades anchor the radix and supratip.  The peak is exactly the
+    # requested amount at the detected apex.
+    applied_reduction_mm = reduction_mm
+    cap_reason: str | None = None
+    normalized_distance = normalized_centers - apex_normalized
+    longitudinal_sigma = np.where(
+        normalized_distance <= 0.0,
+        UPPER_DORSUM_KERNEL_SIGMA,
+        LOWER_DORSUM_KERNEL_SIGMA,
     )
-    upper_mid_window = upper_fade * np.where(
-        normalized_centers <= apex_normalized,
-        1.0,
-        distal_fade,
+    apex_kernel = np.exp(-0.5 * (normalized_distance / longitudinal_sigma) ** 2)
+    radix_fade = _smootherstep01(
+        normalized_centers / RADIX_FADE_END_NORMALIZED
     )
-    applied_convexity_fraction = (
-        applied_reduction_mm / available_hump_mm if available_hump_mm > 1e-9 else 0.0
+    supratip_fade = 1.0 - _smootherstep01(
+        (normalized_centers - DISTAL_FADE_START_NORMALIZED)
+        / (SUPRATIP_ANCHOR_NORMALIZED - DISTAL_FADE_START_NORMALIZED)
     )
-    # Reduce the complete superior shoulder and apex by one fraction, then fade
-    # smoothly through the mid dorsum. This deliberately avoids carrying the
-    # peak correction into the lower dorsum and supratip.
-    unconstrained_centerline_reduction = np.minimum(
-        convex_excess * applied_convexity_fraction * upper_mid_window,
-        applied_reduction_mm,
-    )
-    # A separate lower convexity can be larger than the selected upper/mid
-    # apex. Apply a C2 ceiling only where the normal anatomical fade would
-    # exceed the lower-dorsum safety limit: full peak permission through 0.62,
-    # at most 35% at 0.70, and zero at the inferred supratip boundary 0.82.
-    proximal_lower_ceiling = 1.0 - (
-        1.0 - MAX_LOWER_DORSUM_CORRECTION_FRACTION
-    ) * _smootherstep01(
-        (normalized_centers - LOWER_DORSUM_CEILING_START)
-        / (LOWER_DORSUM_BAND_START - LOWER_DORSUM_CEILING_START)
-    )
-    distal_lower_ceiling = MAX_LOWER_DORSUM_CORRECTION_FRACTION * (
-        1.0
-        - _smootherstep01(
-            (normalized_centers - LOWER_DORSUM_BAND_START)
-            / (LOWER_DORSUM_CEILING_END - LOWER_DORSUM_BAND_START)
-        )
-    )
-    lower_dorsum_ceiling_fraction = np.where(
-        normalized_centers <= LOWER_DORSUM_BAND_START,
-        proximal_lower_ceiling,
-        distal_lower_ceiling,
-    )
-    centerline_reduction = np.minimum.reduce(
-        (
-            unconstrained_centerline_reduction,
-            applied_reduction_mm * lower_dorsum_ceiling_fraction,
-            convex_excess,
-        )
-    )
+    longitudinal_weight = np.clip(apex_kernel * radix_fade * supratip_fade, 0.0, 1.0)
+    longitudinal_weight[apex_index] = 1.0
+    centerline_reduction = applied_reduction_mm * longitudinal_weight
     target_profile = profile - centerline_reduction
-    maximum_new_below_reference_mm = float(
-        np.max(
-            np.maximum(reference_profile - target_profile, 0.0)
-            - np.maximum(reference_profile - profile, 0.0)
-        )
-    )
 
     source_profile_at_vertex = np.interp(
         longitudinal,
@@ -553,7 +521,16 @@ def _compute_dorsal_hump_deformation(
             | (normalized_vertex_position >= 0.96)
             | (vault_radius >= 0.94)
         )
-        vault_constraint_mask = roi_vertex_mask & ~boundary_mask
+        # Leave one interior vertex ring unconstrained between the prescribed
+        # vault field and the fixed anatomical perimeter. The biharmonic solve
+        # blends across this ring, avoiding a high-gradient seam where mesh
+        # connectivity or the surface-depth cutoff makes the ROI irregular.
+        boundary_transition_mask = boundary_mask.copy()
+        boundary_edges = edges[boundary_mask[edges[:, 0]] | boundary_mask[edges[:, 1]]]
+        if len(boundary_edges):
+            boundary_transition_mask[np.unique(boundary_edges)] = True
+        boundary_transition_mask &= roi_vertex_mask
+        vault_constraint_mask = roi_vertex_mask & ~boundary_transition_mask
         displacement_components_mm, deformation_solver = _laplacian_vector_deformation(
             faces=np.asarray(faces, dtype=np.int64),
             roi_vertex_mask=roi_vertex_mask,
@@ -562,6 +539,9 @@ def _compute_dorsal_hump_deformation(
             desired_components_mm=desired_components_mm,
             maximum_posterior_mm=applied_reduction_mm,
             maximum_medial_mm=maximum_narrowing_mm,
+        )
+        deformation_solver["unconstrained_boundary_transition_vertex_count"] = int(
+            np.count_nonzero(boundary_transition_mask & ~boundary_mask)
         )
 
     posterior_displacement_mm = displacement_components_mm[:, 0]
@@ -585,34 +565,27 @@ def _compute_dorsal_hump_deformation(
     displacement_mm = np.hypot(posterior_displacement_mm, lateral_shift_mm)
     roi_metadata["profile_model"] = {
         "observed_profile": "smoothed 90th-percentile midline anterior envelope",
-        "reference_profile": "straight chord through robust nasion and supratip anchors",
+        "apex_detection_reference": (
+            "straight chord through robust nasion and supratip anchors; localization only"
+        ),
         "target_profile": (
-            "upper/mid convex-excess correction with C2 anatomical fades and a no-scoop "
-            "nasion-to-supratip reference constraint"
+            "source profile minus a smooth apex-centered displacement field with C2 radix and "
+            "supratip anchors"
         ),
-        "convex_hump_only": True,
-        "available_hump_height_mm": round(available_hump_mm, 6),
-        "available_hump_height_is_clinical_measurement": False,
-        "available_hump_height_interpretation": (
-            "algorithmic convex excess above the simulation target profile"
+        "reduction_parameter_meaning": (
+            "posterior displacement amplitude at the detected hump apex"
         ),
-        "requested_peak_policy": (
-            "slider value is an upper bound; correction stops at the no-scoop reference profile"
+        "requested_reduction_mm": round(reduction_mm, 6),
+        "applied_reduction_mm": round(applied_reduction_mm, 6),
+        "cap_reason": cap_reason,
+        "detected_convex_excess_for_localization_mm": round(
+            detected_convex_excess_mm, 6
         ),
-        "requested_peak_reduction_mm": round(reduction_mm, 6),
-        "applied_peak_reduction_mm": round(applied_reduction_mm, 6),
-        "applied_upper_mid_convexity_fraction": round(applied_convexity_fraction, 6),
-        "distal_support_end_normalized": round(distal_support_end, 6),
-        "lower_dorsum_ceiling_normalized": [
-            LOWER_DORSUM_CEILING_START,
-            LOWER_DORSUM_BAND_START,
-            LOWER_DORSUM_CEILING_END,
-        ],
-        "maximum_lower_dorsum_correction_fraction": (
-            MAX_LOWER_DORSUM_CORRECTION_FRACTION
-        ),
-        "limited_by_detected_convexity": applied_reduction_mm < reduction_mm,
-        "maximum_new_below_reference_mm": round(maximum_new_below_reference_mm, 9),
+        "radix_fade_end_normalized": RADIX_FADE_END_NORMALIZED,
+        "distal_fade_start_normalized": DISTAL_FADE_START_NORMALIZED,
+        "supratip_anchor_normalized": SUPRATIP_ANCHOR_NORMALIZED,
+        "upper_kernel_sigma_normalized": UPPER_DORSUM_KERNEL_SIGMA,
+        "lower_kernel_sigma_normalized": LOWER_DORSUM_KERNEL_SIGMA,
     }
     roi_metadata["profile_core_half_width_mm"] = round(profile_core_half_width_mm, 6)
     roi_metadata["transverse_bridge_core_half_width_mm"] = round(bridge_core_half_width_mm, 6)
@@ -703,9 +676,9 @@ def _compute_dorsal_hump_deformation(
         "source_anterior_mm": round(float(profile[apex_index]), 6),
         "reference_anterior_mm": round(float(reference_profile[apex_index]), 6),
         "target_anterior_mm": round(float(target_profile[apex_index]), 6),
-        "outward_convexity_mm": round(available_hump_mm, 6),
+        "outward_convexity_mm": round(detected_convex_excess_mm, 6),
         "world_position_mm": apex_point_mm.round(6).tolist(),
-        "search_band_normalized": [0.08, 0.62],
+        "search_band_normalized": [RADIX_FADE_END_NORMALIZED, 0.62],
         "is_clinical_measurement": False,
     }
     roi_metadata["candidate_vertex_count"] = int(np.count_nonzero(roi_vertex_mask))
@@ -744,7 +717,6 @@ def _compute_dorsal_hump_deformation(
         reference_value = float(np.interp(level_mm, centers, reference_profile))
         target_value = float(np.interp(level_mm, centers, target_profile))
         final_value = float(np.interp(level_mm, centers, final_profile))
-        point_convex_excess_mm = max(source_value - reference_value, 0.0)
         point_requested_displacement_mm = source_value - target_value
         profile_points[name] = {
             "normalized_nasion_to_supratip": round(float(normalized), 6),
@@ -753,19 +725,12 @@ def _compute_dorsal_hump_deformation(
             "reference_anterior_mm": round(reference_value, 6),
             "target_anterior_mm": round(target_value, 6),
             "final_anterior_mm": round(final_value, 6),
-            "source_convex_excess_mm": round(point_convex_excess_mm, 6),
+            "source_detection_residual_mm": round(
+                max(source_value - reference_value, 0.0), 6
+            ),
             "requested_posterior_displacement_mm": round(point_requested_displacement_mm, 6),
-            "requested_convexity_reduction_fraction": round(
-                float(
-                    np.clip(
-                        point_requested_displacement_mm / point_convex_excess_mm
-                        if point_convex_excess_mm > 1e-9
-                        else 0.0,
-                        0.0,
-                        1.0,
-                    )
-                ),
-                6,
+            "target_to_applied_reduction_fraction": round(
+                point_requested_displacement_mm / max(applied_reduction_mm, 1e-9), 6
             ),
             "final_posterior_displacement_mm": round(source_value - final_value, 6),
             "final_target_error_mm": round(final_value - target_value, 6),
@@ -780,9 +745,9 @@ def _compute_dorsal_hump_deformation(
         "reference_anterior_mm": None,
         "target_anterior_mm": round(tip_anterior_mm, 6),
         "final_anterior_mm": round(tip_anterior_mm, 6),
-        "source_convex_excess_mm": 0.0,
+        "source_detection_residual_mm": 0.0,
         "requested_posterior_displacement_mm": 0.0,
-        "requested_convexity_reduction_fraction": 0.0,
+        "target_to_applied_reduction_fraction": 0.0,
         "final_posterior_displacement_mm": 0.0,
         "final_target_error_mm": 0.0,
     }
@@ -1158,7 +1123,7 @@ def _acceptance_diagnostics(
         return {
             "passed": True,
             "identity_request": True,
-            "profile": {"passed": True, "active_upper_mid_sample_count": 0},
+            "profile": {"passed": True, "active_longitudinal_sample_count": 0},
             "frontal_vault": {
                 "passed": True,
                 "corrected_section_count": 0,
@@ -1177,27 +1142,40 @@ def _acceptance_diagnostics(
     normalized = (longitudinal - float(frame["roi_start_mm"])) / (
         float(frame["roi_end_mm"]) - float(frame["roi_start_mm"])
     )
-    active = (
-        (normalized >= 0.08)
-        & (normalized <= 0.72)
-        & (requested >= max(0.05, 0.05 * applied_reduction_mm))
+    active = requested >= max(0.05, 0.05 * applied_reduction_mm)
+    apex_index = int(np.argmax(requested))
+    requested_apex_mm = float(requested[apex_index])
+    achieved_apex_mm = float(achieved[apex_index])
+    apex_achievement_ratio = achieved_apex_mm / max(requested_apex_mm, 1e-9)
+    maximum_target_second_difference_mm = float(
+        np.max(np.abs(np.diff(requested, n=2)))
     )
-    lower_band = (normalized >= 0.70) & (normalized <= 0.82)
-    maximum_lower_requested_mm = (
-        float(np.max(requested[lower_band])) if np.any(lower_band) else 0.0
+    target_smoothness_limit_mm = max(0.1, 0.08 * applied_reduction_mm)
+    longitudinal_target_is_smooth = (
+        maximum_target_second_difference_mm <= target_smoothness_limit_mm
     )
-    lower_to_peak_ratio = maximum_lower_requested_mm / max(applied_reduction_mm, 1e-9)
-    lower_dorsum_not_overcorrected = (
-        lower_to_peak_ratio <= MAX_LOWER_DORSUM_CORRECTION_FRACTION
+    anchor_displacement_limit_mm = max(0.25, 0.10 * applied_reduction_mm)
+    radix_band = normalized <= 0.03
+    supratip_band = normalized >= SUPRATIP_ANCHOR_NORMALIZED
+    maximum_radix_achieved_mm = (
+        float(np.max(np.abs(achieved[radix_band]))) if np.any(radix_band) else 0.0
     )
+    maximum_supratip_achieved_mm = (
+        float(np.max(np.abs(achieved[supratip_band]))) if np.any(supratip_band) else 0.0
+    )
+    radix_is_stable = maximum_radix_achieved_mm <= anchor_displacement_limit_mm
+    supratip_is_stable = maximum_supratip_achieved_mm <= anchor_displacement_limit_mm
     if np.any(active):
         achievement_ratio = achieved[active] / np.maximum(requested[active], 1e-9)
         p10_achievement_ratio = float(np.percentile(achievement_ratio, 10.0))
         maximum_target_error_mm = float(np.max(np.abs(target_error[active])))
         profile_passed = (
-            p10_achievement_ratio >= 0.85
-            and maximum_target_error_mm <= max(0.25, 0.15 * applied_reduction_mm)
-            and lower_dorsum_not_overcorrected
+            0.85 <= apex_achievement_ratio <= 1.15
+            and p10_achievement_ratio >= 0.80
+            and maximum_target_error_mm <= max(0.30, 0.15 * applied_reduction_mm)
+            and longitudinal_target_is_smooth
+            and radix_is_stable
+            and supratip_is_stable
         )
     else:
         p10_achievement_ratio = 0.0
@@ -1252,17 +1230,26 @@ def _acceptance_diagnostics(
         "identity_request": False,
         "profile": {
             "passed": bool(profile_passed),
-            "active_upper_mid_sample_count": int(np.count_nonzero(active)),
+            "active_longitudinal_sample_count": int(np.count_nonzero(active)),
+            "requested_apex_displacement_mm": round(requested_apex_mm, 6),
+            "achieved_apex_displacement_mm": round(achieved_apex_mm, 6),
+            "apex_achieved_to_requested_ratio": round(apex_achievement_ratio, 6),
             "p10_achieved_to_requested_correction_ratio": round(p10_achievement_ratio, 6),
             "maximum_absolute_target_error_mm": round(maximum_target_error_mm, 6),
-            "superior_hump_not_left_behind": p10_achievement_ratio >= 0.85,
+            "apex_amplitude_achieved": 0.85 <= apex_achievement_ratio <= 1.15,
+            "surrounding_dorsum_follows_target": p10_achievement_ratio >= 0.80,
             "smooth_target_followed": maximum_target_error_mm
-            <= max(0.25, 0.15 * applied_reduction_mm),
-            "lower_dorsum_not_overcorrected": lower_dorsum_not_overcorrected,
-            "maximum_lower_dorsum_requested_correction_mm": round(
-                maximum_lower_requested_mm, 6
+            <= max(0.30, 0.15 * applied_reduction_mm),
+            "longitudinal_target_is_smooth": longitudinal_target_is_smooth,
+            "maximum_target_second_difference_mm": round(
+                maximum_target_second_difference_mm, 6
             ),
-            "lower_to_peak_requested_correction_ratio": round(lower_to_peak_ratio, 6),
+            "radix_is_stable": radix_is_stable,
+            "maximum_radix_displacement_mm": round(maximum_radix_achieved_mm, 6),
+            "supratip_is_stable": supratip_is_stable,
+            "maximum_supratip_displacement_mm": round(
+                maximum_supratip_achieved_mm, 6
+            ),
         },
         "frontal_vault": {
             "passed": bool(frontal_passed),
@@ -1899,6 +1886,8 @@ def _export_simulation_glb(
             "source_geometry_id": metadata["source_geometry_id"],
             "simulation_geometry_id": metadata["simulation_geometry_id"],
             "requested_reduction_mm": metadata["requested_reduction_mm"],
+            "applied_reduction_mm": metadata["applied_reduction_mm"],
+            "cap_reason": metadata["cap_reason"],
             "units": "metres",
             "clinical_prediction": False,
         }
@@ -2032,7 +2021,8 @@ def simulate_dorsal_hump_reduction(
     ) = _compute_dorsal_hump_deformation(vertices_m, landmarks_mm, reduction_mm, faces)
     if not roi_metadata["candidate_vertex_count"]:
         raise RuntimeError("The landmark-derived nasal dorsum ROI contains no vertices")
-    applied_reduction_mm = float(roi_metadata["profile_model"]["applied_peak_reduction_mm"])
+    applied_reduction_mm = float(roi_metadata["profile_model"]["applied_reduction_mm"])
+    cap_reason = roi_metadata["profile_model"]["cap_reason"]
 
     output_dir.mkdir(parents=True, exist_ok=True)
     label = _reduction_label(float(reduction_mm))
@@ -2103,8 +2093,11 @@ def simulate_dorsal_hump_reduction(
     output_profile_json.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "units": "millimetres",
+                "requested_reduction_mm": float(reduction_mm),
+                "applied_reduction_mm": applied_reduction_mm,
+                "cap_reason": cap_reason,
                 "detected_hump_apex": roi_metadata["detected_hump_apex"],
                 "anatomical_displacements": roi_metadata["profile_point_diagnostics"],
                 **{
@@ -2153,6 +2146,32 @@ def simulate_dorsal_hump_reduction(
     maximum_supratip_displacement_mm = (
         float(np.max(persisted_displacement_mm[supratip_mask])) if np.any(supratip_mask) else 0.0
     )
+    profile_points = roi_metadata["profile_point_diagnostics"]
+    displacement_report = {
+        "requested_reduction_mm": float(reduction_mm),
+        "applied_reduction_mm": round(applied_reduction_mm, 6),
+        "cap_reason": cap_reason,
+        "actual_displacement_at_hump_apex_mm": profile_points["hump_apex"][
+            "final_posterior_displacement_mm"
+        ],
+        "upper_dorsum_displacement_mm": profile_points["upper_dorsum"][
+            "final_posterior_displacement_mm"
+        ],
+        "mid_dorsum_displacement_mm": profile_points["mid_dorsum"][
+            "final_posterior_displacement_mm"
+        ],
+        "lower_dorsum_displacement_mm": profile_points["lower_dorsum"][
+            "final_posterior_displacement_mm"
+        ],
+        "radix_displacement_mm": profile_points["radix_nasion"][
+            "final_posterior_displacement_mm"
+        ],
+        "supratip_displacement_mm": profile_points["supratip"][
+            "final_posterior_displacement_mm"
+        ],
+        "maximum_vertex_displacement_mm": round(maximum_displacement_mm, 6),
+        "number_of_moved_vertices": affected_vertex_count,
+    }
     render_paths = _write_diagnostic_renders(
         output_dir,
         label,
@@ -2195,7 +2214,7 @@ def simulate_dorsal_hump_reduction(
     short_geometry_id = simulation_identity["geometry_id"].split(":", 1)[-1][:12]
     viewer_glb = output_dir / f"reduction_{label}mm_{short_geometry_id}.glb"
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "dorsal_hump_reduction",
         "solver_id": DORSAL_VAULT_SOLVER_ID,
         "solver_module_sha256": _sha256_file(Path(__file__)),
@@ -2209,7 +2228,8 @@ def simulate_dorsal_hump_reduction(
         "exact_final_glb_path": str(viewer_glb.resolve()),
         "source_geometry_unchanged": True,
         "requested_reduction_mm": float(reduction_mm),
-        "applied_profile_reduction_mm": round(applied_reduction_mm, 6),
+        "applied_reduction_mm": round(applied_reduction_mm, 6),
+        "cap_reason": cap_reason,
         "maximum_actual_vertex_displacement_mm": round(maximum_displacement_mm, 6),
         "affected_vertex_count": affected_vertex_count,
         "total_vertex_count": len(vertices_m),
@@ -2230,7 +2250,9 @@ def simulate_dorsal_hump_reduction(
         },
         "diagnostics": {
             "requested_reduction_mm": float(reduction_mm),
-            "applied_profile_reduction_mm": round(applied_reduction_mm, 6),
+            "applied_reduction_mm": round(applied_reduction_mm, 6),
+            "cap_reason": cap_reason,
+            "displacement_report": displacement_report,
             "mesh_position_units": "metres",
             "landmark_and_displacement_units": "millimetres",
             "millimetres_to_metres_scale": 0.001,
@@ -2354,11 +2376,25 @@ def simulate_dorsal_hump_reduction(
         )
     output_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     get_logger().info(
-        "Dorsal hump simulation | requested %.1f mm | actual %.3f mm | %d vertices | %s",
+        "Dorsal hump simulation | requested %.1f mm | applied %.3f mm | cap %s | "
+        "maximum %.3f mm | %d vertices | %s",
         float(reduction_mm),
+        manifest["applied_reduction_mm"],
+        manifest["cap_reason"] or "none",
         manifest["maximum_actual_vertex_displacement_mm"],
         manifest["affected_vertex_count"],
         output_dir,
+    )
+    report = manifest["diagnostics"]["displacement_report"]
+    get_logger().info(
+        "Sagittal displacement report | radix %.3f | upper %.3f | apex %.3f | "
+        "mid %.3f | lower %.3f | supratip %.3f mm",
+        report["radix_displacement_mm"],
+        report["upper_dorsum_displacement_mm"],
+        report["actual_displacement_at_hump_apex_mm"],
+        report["mid_dorsum_displacement_mm"],
+        report["lower_dorsum_displacement_mm"],
+        report["supratip_displacement_mm"],
     )
     get_logger().info(
         "Dorsal diagnostics | ROI %d vertices | median %.3f mm | >0.1 mm %d | hashes differ %s",

@@ -79,15 +79,12 @@ roughness maps are future appearance assets; they must follow the same policies.
 
 The experimental dorsal-hump operation reads authoritative vertices once and writes a separate
 geometry state. It derives superior–inferior, left–right, and anterior axes from existing nasal
-landmarks, estimates the observed midline dorsal envelope, fits a smooth target through the outer
-dorsal bands, and uses only positive convex excess to localize the hump. The normalized hump weight
-is searched only in the upper/mid-dorsum for one explicit apex. The requested correction is capped
-at the detected convexity so it cannot create a sagittal scoop. The complete connected upper/mid
-convexity receives the apex correction fraction, with C2 fades at the nasion and supratip; this keeps
-the superior shoulder from being attenuated more strongly than the peak. A separate C2 ceiling is
-inactive for ordinary targets but limits an excessive distal target to 35% of the applied peak at the
-lower-dorsum boundary and zero at the supratip. This keeps a larger distal convexity from exceeding
-the lower-to-peak safety limit without sharpening an already-safe anatomical fade.
+landmarks and estimates the observed midline dorsal envelope. A chord-relative residual localizes one
+upper/mid-dorsal hump apex but does not define or cap the deformation. `reduction_mm` is the posterior
+displacement amplitude at that apex. A broad asymmetric Gaussian longitudinal field with C2 radix and
+supratip fades is subtracted from the source profile to create the target. Requested, applied, and cap
+reason are explicit provenance fields; the current 0.0–5.0 mm operation applies the requested value
+without a hidden convexity cap.
 
 Deformation uses one vector-valued biharmonic solve over one connected dorsal surface. At every
 longitudinal position, `delta(s)` drives a transverse target whose ridge weight is strongest, whose
@@ -95,7 +92,8 @@ slopes retain more than 90% of that target, and whose sidewalls taper continuous
 the anatomical vault perimeter. Posterior and mild medial components share the same constraint
 system, so the centerline cannot move independently of the vault. Triangle adjacency, fixed
 nasion/supratip/perimeter boundaries, and the smooth target field preserve continuous transitions.
-The operation does not displace along vertex normals or symmetrize the source face.
+An unconstrained transition ring blends the prescribed vault into that fixed perimeter. The operation
+does not displace along vertex normals or symmetrize the source face.
 
 The original PLY, GLB, `geometry.json`, `landmarks.json`, and measurements remain untouched. UV-seam
 render vertices follow their corresponding canonical corners in the simulated GLB. A saved

@@ -21,6 +21,7 @@ def test_colab_notebook_is_valid_and_has_no_saved_outputs() -> None:
     assert '"--output-dir"' in source
     assert "completed_dorsal_requests" not in source
     assert "EXPECTED_DORSAL_SOLVER_ID" in source
+    assert "coupled-vector-biharmonic-full-vault-v2" in source
     assert "DORSAL_VAULT_SOLVER_ID" in source
     assert "Refusing to run a stale dorsal-hump solver" in source
     assert "import json" in source
