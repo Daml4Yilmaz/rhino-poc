@@ -539,10 +539,13 @@ non-convex profile regions receive no displacement. The apex is the maximum raw 
 the upper/mid-dorsal search band (normalized 0.08–0.62 from nasion to supratip), so a secondary
 lower-dorsum or supratip deviation cannot become the reduction center. The applied peak is the lesser
 of the requested slider value and detected convexity. Every upper/mid profile sample receives that
-same fractional convexity reduction through the apex, followed by a C2 fade through the mid dorsum.
-This prevents the lower dorsum and supratip from receiving the full apex correction. The result never
-crosses the no-scoop reference curve. The reported available hump height is algorithmic rather than
-an anatomical or clinical measurement.
+same fractional convexity reduction through the apex, followed by an adaptive C2 fade through the mid
+dorsum. An additional C2 ceiling leaves ordinary targets unchanged but bounds any excessive distal
+target: it begins at normalized position 0.62, permits at most 35% of the applied peak at the protected
+lower-dorsum boundary 0.70, and reaches zero at 0.82. This remains safe even when a separate lower
+convexity is larger than the selected upper/mid hump. The result never crosses the no-scoop reference
+curve. The reported available hump height is algorithmic rather than an anatomical or clinical
+measurement.
 
 For each vertex of the connected dorsal vault, the simulator interpolates `delta(s)` and multiplies
 it by a smooth transverse vault weight. The ridge receives full correction, adjacent slopes retain

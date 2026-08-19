@@ -23,6 +23,10 @@ REQUIRED_LANDMARKS = {
 MIN_REDUCTION_MM = 0.0
 MAX_REDUCTION_MM = 5.0
 DORSAL_VAULT_SOLVER_ID = "coupled-vector-biharmonic-full-vault-v1"
+LOWER_DORSUM_CEILING_START = 0.62
+LOWER_DORSUM_BAND_START = 0.70
+LOWER_DORSUM_CEILING_END = 0.82
+MAX_LOWER_DORSUM_CORRECTION_FRACTION = 0.35
 # Medial refinement remains mild even though it is solved together with the
 # posterior full-vault field.
 MAX_TRANSVERSE_MEDIAL_ADJUSTMENT_MM = 0.6
@@ -388,9 +392,38 @@ def _compute_dorsal_hump_deformation(
     # Reduce the complete superior shoulder and apex by one fraction, then fade
     # smoothly through the mid dorsum. This deliberately avoids carrying the
     # peak correction into the lower dorsum and supratip.
-    centerline_reduction = np.minimum(
+    unconstrained_centerline_reduction = np.minimum(
         convex_excess * applied_convexity_fraction * upper_mid_window,
-        convex_excess,
+        applied_reduction_mm,
+    )
+    # A separate lower convexity can be larger than the selected upper/mid
+    # apex. Apply a C2 ceiling only where the normal anatomical fade would
+    # exceed the lower-dorsum safety limit: full peak permission through 0.62,
+    # at most 35% at 0.70, and zero at the inferred supratip boundary 0.82.
+    proximal_lower_ceiling = 1.0 - (
+        1.0 - MAX_LOWER_DORSUM_CORRECTION_FRACTION
+    ) * _smootherstep01(
+        (normalized_centers - LOWER_DORSUM_CEILING_START)
+        / (LOWER_DORSUM_BAND_START - LOWER_DORSUM_CEILING_START)
+    )
+    distal_lower_ceiling = MAX_LOWER_DORSUM_CORRECTION_FRACTION * (
+        1.0
+        - _smootherstep01(
+            (normalized_centers - LOWER_DORSUM_BAND_START)
+            / (LOWER_DORSUM_CEILING_END - LOWER_DORSUM_BAND_START)
+        )
+    )
+    lower_dorsum_ceiling_fraction = np.where(
+        normalized_centers <= LOWER_DORSUM_BAND_START,
+        proximal_lower_ceiling,
+        distal_lower_ceiling,
+    )
+    centerline_reduction = np.minimum.reduce(
+        (
+            unconstrained_centerline_reduction,
+            applied_reduction_mm * lower_dorsum_ceiling_fraction,
+            convex_excess,
+        )
     )
     target_profile = profile - centerline_reduction
     maximum_new_below_reference_mm = float(
@@ -569,6 +602,15 @@ def _compute_dorsal_hump_deformation(
         "requested_peak_reduction_mm": round(reduction_mm, 6),
         "applied_peak_reduction_mm": round(applied_reduction_mm, 6),
         "applied_upper_mid_convexity_fraction": round(applied_convexity_fraction, 6),
+        "distal_support_end_normalized": round(distal_support_end, 6),
+        "lower_dorsum_ceiling_normalized": [
+            LOWER_DORSUM_CEILING_START,
+            LOWER_DORSUM_BAND_START,
+            LOWER_DORSUM_CEILING_END,
+        ],
+        "maximum_lower_dorsum_correction_fraction": (
+            MAX_LOWER_DORSUM_CORRECTION_FRACTION
+        ),
         "limited_by_detected_convexity": applied_reduction_mm < reduction_mm,
         "maximum_new_below_reference_mm": round(maximum_new_below_reference_mm, 9),
     }
@@ -1145,7 +1187,9 @@ def _acceptance_diagnostics(
         float(np.max(requested[lower_band])) if np.any(lower_band) else 0.0
     )
     lower_to_peak_ratio = maximum_lower_requested_mm / max(applied_reduction_mm, 1e-9)
-    lower_dorsum_not_overcorrected = lower_to_peak_ratio <= 0.35
+    lower_dorsum_not_overcorrected = (
+        lower_to_peak_ratio <= MAX_LOWER_DORSUM_CORRECTION_FRACTION
+    )
     if np.any(active):
         achievement_ratio = achieved[active] / np.maximum(requested[active], 1e-9)
         p10_achievement_ratio = float(np.percentile(achievement_ratio, 10.0))

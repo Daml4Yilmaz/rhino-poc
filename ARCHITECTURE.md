@@ -84,7 +84,10 @@ dorsal bands, and uses only positive convex excess to localize the hump. The nor
 is searched only in the upper/mid-dorsum for one explicit apex. The requested correction is capped
 at the detected convexity so it cannot create a sagittal scoop. The complete connected upper/mid
 convexity receives the apex correction fraction, with C2 fades at the nasion and supratip; this keeps
-the superior shoulder from being attenuated more strongly than the peak.
+the superior shoulder from being attenuated more strongly than the peak. A separate C2 ceiling is
+inactive for ordinary targets but limits an excessive distal target to 35% of the applied peak at the
+lower-dorsum boundary and zero at the supratip. This keeps a larger distal convexity from exceeding
+the lower-to-peak safety limit without sharpening an already-safe anatomical fade.
 
 Deformation uses one vector-valued biharmonic solve over one connected dorsal surface. At every
 longitudinal position, `delta(s)` drives a transverse target whose ridge weight is strongest, whose

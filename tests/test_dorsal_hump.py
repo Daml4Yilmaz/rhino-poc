@@ -73,6 +73,24 @@ def _synthetic_upper_hump_with_larger_supratip_bulge() -> tuple[
     return vertices_mm / 1000.0, faces, landmarks
 
 
+def _synthetic_distal_hump_with_lower_dorsum_convexity() -> tuple[
+    np.ndarray, np.ndarray, dict[str, np.ndarray]
+]:
+    vertices, faces, landmarks = _synthetic_face(hump_height_mm=0.0)
+    vertices_mm = vertices * 1000.0
+    lateral = vertices_mm[:, 0]
+    longitudinal = vertices_mm[:, 1]
+    distal_hump = 3.5 * np.exp(-0.5 * ((longitudinal - 24.0) / 7.0) ** 2)
+    lower_convexity = 2.0 * np.exp(-0.5 * ((longitudinal - 33.0) / 4.0) ** 2)
+    vertices_mm[:, 2] = (
+        0.32 * longitudinal
+        + distal_hump
+        + lower_convexity
+        - 0.018 * lateral**2
+    )
+    return vertices_mm / 1000.0, faces, landmarks
+
+
 def _write_mesh(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     import open3d as o3d
 
@@ -221,6 +239,19 @@ def test_upper_and_mid_hump_shoulders_receive_the_apex_correction_fraction() -> 
     assert points["lower_dorsum"]["requested_posterior_displacement_mm"] == 0.0
     assert points["supratip"]["requested_posterior_displacement_mm"] == 0.0
     assert points["pronasale"]["final_posterior_displacement_mm"] == 0.0
+
+
+def test_distal_hump_fades_below_lower_dorsum_acceptance_limit() -> None:
+    vertices, faces, landmarks = _synthetic_distal_hump_with_lower_dorsum_convexity()
+
+    _, _, roi = compute_dorsal_hump_deformation(vertices, landmarks, 3.5, faces)
+
+    applied = roi["profile_model"]["applied_peak_reduction_mm"]
+    lower = roi["profile_point_diagnostics"]["lower_dorsum"]
+    assert roi["detected_hump_apex"]["normalized_nasion_to_supratip"] > 0.60
+    assert lower["source_convex_excess_mm"] > applied
+    assert lower["requested_posterior_displacement_mm"] <= 0.35 * applied
+    assert roi["profile_model"]["lower_dorsum_ceiling_normalized"] == [0.62, 0.70, 0.82]
 
 
 def test_connected_profile_vertex_is_not_left_fixed_by_pointwise_clipping() -> None:
